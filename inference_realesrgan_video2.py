@@ -47,7 +47,7 @@ def get_sub_video(args, num_process, process_idx):
     out_path = osp.join(args.output, f'{args.video_name}_inp_tmp_videos', f'{process_idx:03d}.mp4')
     cmd = [
         args.ffmpeg_bin, f'-i {args.input}', '-ss', f'{part_time * process_idx}',
-        f'-to {part_time * (process_idx + 1)}' if process_idx != num_process - 1 else '', '-async 1', out_path, '-y'
+        f'-to {part_time * (process_idx + 1)}' if process_idx != num_process - 1 else '', "-codec", "copy", '-async 1', out_path, '-y'
     ]
     print(' '.join(cmd))
     subprocess.call(' '.join(cmd), shell=True)
