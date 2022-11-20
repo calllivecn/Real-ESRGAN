@@ -54,6 +54,31 @@ def get_sub_video(args, num_process, process_idx):
     return out_path
 
 
+def get_sub_video2(args, num_process, process_idx):
+    if num_process == 1:
+        return args.input
+    meta = get_video_meta_info(args.input)
+
+    duration = int(meta['nb_frames'] / meta['fps'])
+
+    part_time = duration // num_process
+
+    print(f'duration: {duration}, part_time: {part_time}')
+    os.makedirs(osp.join(args.output, f'{args.video_name}_inp_tmp_videos'), exist_ok=True)
+    out_path = osp.join(args.output, f'{args.video_name}_inp_tmp_videos', f'{process_idx:03d}.mp4')
+
+    ss = f'{part_time * process_idx}'
+    if process_idx != num_process - 1:
+       to = f'{part_time * (process_idx + 1)}' 
+        cmd = [args.ffmpeg_bin, '-ss', ss, "-to", to, f'-i {args.input}', "-codec", "copy", '-async 1', out_path, '-y']
+    else:
+        cmd = [args.ffmpeg_bin, '-ss', ss, "-to", to, f'-i {args.input}', "-codec", "copy", '-async 1', out_path, '-y']
+
+
+    print(cmd)
+    subprocess.run(cmd, shell=True)
+    return out_path
+
 class Reader:
 
     def __init__(self, args, total_workers=1, worker_idx=0):
@@ -313,7 +338,7 @@ def run(args):
             f.write(f'file \'{args.video_name}_out_tmp_videos/{i:03d}.mp4\'\n')
 
     cmd = [
-        args.ffmpeg_bin, '-f', 'concat', '-safe', '0', '-i', f'{args.output}/{args.video_name}_vidlist.txt', '-c',
+        args.ffmpeg_bin, '-f', 'concat', "-auto_convert", "1", '-safe', '0', '-i', f'{args.output}/{args.video_name}_vidlist.txt', '-c',
         'copy', f'{video_save_path}'
     ]
     print(' '.join(cmd))
