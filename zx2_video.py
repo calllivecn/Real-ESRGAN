@@ -469,7 +469,7 @@ def inference_video(args, put_queue, get_queue, device=None):
     # model_path = os.path.join('weights', args.model_name + '.pth')
     weights = Path('weights')
     model_path = weights / (args.model_name + '.pth')
-    if not model_path.isfile():
+    if not model_path.is_file():
         ROOT_DIR = Path(__file__).parent
         for url in file_url:
             # model_path will be updated
