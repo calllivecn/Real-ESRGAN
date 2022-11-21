@@ -511,10 +511,11 @@ def inference_video(args, put_queue, get_queue, device=None):
     else:
         face_enhancer = None
 
+    print(f"inference_video() pid: {os.getpid()} 启动")
     while True:
         img = put_queue.get()
         if img is None:
-            get_queue.put(None)
+            put_queue.put(None)
             print(f"inference_video() pid: {os.getpid()} 退出")
             break
 
@@ -543,16 +544,7 @@ def run(args):
 
     input_path = Path(args.input)
 
-    """
-    sub_video_split_dir = input_path.parent / (input_path.name + "_split")
-    sub_video_split_dir.mkdir(exist_ok=True)
-
-    sub_video_out_dir = input_path.parent / (input_path.name + "_sub_out")
-    sub_video_out_dir.mkdir(exist_ok=True)
-    """
-
     video_save_path = output / f"{os.path.splitext(input_path.name)[0]}_{args.suffix}{video_suffix}"
-
 
     put_queue = torch_Queue(8)
     get_queue = torch_Queue(8)
@@ -580,6 +572,12 @@ def run(args):
 
         q.put(None)
 
+    def get4inference(q, writer):
+        pbar = tqdm(total=len(reader), unit='frame', desc='inference')
+        while (frame := q.get()) is not None:
+            writer.write_frame(frame)
+            pbar.update(1)
+
     reader = Reader(args, input_path) # zx
     audio = reader.get_audio()
     height, width = reader.get_resolution()
@@ -588,19 +586,24 @@ def run(args):
 
     p1 = torch_mp.Process(target=put2inference, args=(put_queue, reader))
     p1.start()
-    process.append(p1)
 
-    pbar = tqdm(total=len(reader), unit='frame', desc='inference')
-    while (frame := get_queue.get()) is not None:
-        writer.write_frame(frame)
-        pbar.update(1)
+    p2 = torch_mp.Process(target=get4inference, args=(get_queue, writer))
+    p2.start()
 
-    print("已经inference_vide() 处理完了？？？")
+    # 等待GPU Pool 退出
+    [ p.join() for p in process ]
+
+    # 给 get4inference() 退出信号
+    get_queue.put(None)
+
+    p1.join()
+    p2.join()
+
+    print("已经inference_vide() 处理完了")
 
     # finally cleanup
     reader.close()
     writer.close()
-    [ p.join() for p in process ]
 
 
 def main():
