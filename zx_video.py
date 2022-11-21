@@ -75,7 +75,7 @@ def split_sub_video(number, meta, in_path, out_path):
     suffix = meta["suffix"]
 
     # 分成 num_process_per_gpu 块， 会分成多少个文件
-    time_port, d = divmod(meta['duration'] , number)
+    time_port, d = divmod(int(meta['duration']) , number)
     if d > 0:
         videos = time_port + 1
 
