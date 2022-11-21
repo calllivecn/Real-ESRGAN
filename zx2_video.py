@@ -584,7 +584,7 @@ def run(args):
     fps = reader.get_fps()
     writer = Writer(args, audio, height, width, str(video_save_path), fps)
 
-    p1 = torch_mp.Process(put2inference, args=(put_queue, reader))
+    p1 = torch_mp.Process(target=put2inference, args=(put_queue, reader))
     p1.start()
 
     pbar = tqdm(total=len(reader), unit='frame', desc='inference')
