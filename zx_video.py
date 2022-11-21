@@ -78,6 +78,8 @@ def split_sub_video(number, meta, in_path, out_path):
     time_port, d = divmod(round(float(meta['duration'])) , number)
     if d > 0:
         videos = number + 1
+    else:
+        videos = number
 
     cmd = [
         "ffmpeg", "-hide_banner", "-i", str(in_path),
