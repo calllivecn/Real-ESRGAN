@@ -272,7 +272,6 @@ def inference_video(args, video_in_path, video_save_path, device=None):
     pbar = tqdm(total=len(reader), unit='frame', desc='inference')
     while True:
         img = reader.get_frame()
-        print("开始推理了。 get_freame() line:275")
         if img is None:
             break
 
