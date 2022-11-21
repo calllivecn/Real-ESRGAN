@@ -515,6 +515,7 @@ def inference_video(args, put_queue, get_queue, device=None):
         img = put_queue.get()
         if img is None:
             get_queue.put(None)
+            print(f"inference_video() pid: {os.getpid()} 退出")
             break
 
         try:
@@ -561,11 +562,11 @@ def run(args):
     total_process = num_gpus * args.num_process_per_gpu
 
     # 启动GPU 进程
-    gpu_process = []
+    process = []
     for i in range(total_process):
         p = torch_mp.Process(target=inference_video, args=(args, put_queue, get_queue, torch.device(i % num_gpus)))
         p.start()
-        gpu_process.append(p)
+        process.append(p)
 
     print("GPU Pool start")
 
@@ -587,6 +588,7 @@ def run(args):
 
     p1 = torch_mp.Process(target=put2inference, args=(put_queue, reader))
     p1.start()
+    process.append(p1)
 
     pbar = tqdm(total=len(reader), unit='frame', desc='inference')
     while (frame := get_queue.get()) is not None:
@@ -598,7 +600,7 @@ def run(args):
     # finally cleanup
     reader.close()
     writer.close()
-    [ p.join() for p in gpu_process ]
+    [ p.join() for p in process ]
 
 
 def main():
