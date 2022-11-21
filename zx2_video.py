@@ -582,7 +582,7 @@ def run(args):
     audio = reader.get_audio()
     height, width = reader.get_resolution()
     fps = reader.get_fps()
-    writer = Writer(args, audio, height, width, video_save_path, fps)
+    writer = Writer(args, audio, height, width, str(video_save_path), fps)
 
     p1 = torch_mp.Process(put2inference, args=(put_queue, reader))
     p1.start()
