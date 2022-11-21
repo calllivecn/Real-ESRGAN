@@ -80,14 +80,14 @@ def split_sub_video(number, meta, in_path, out_path):
         videos = number + 1
 
     cmd = [
-        "ffmpeg", "-i", in_path,
+        "ffmpeg", "-i", str(in_path),
         "-f", "segment", "-segment_time", f"{time_port}s",
-        "-codec", "copy", '-async', '1', out_path / f"%03d{suffix}", '-y'
+        "-codec", "copy", '-async', '1', str(out_path / f"%03d{suffix}"), '-y'
         ]
 
 
-    print("分割视频：", cmd)
     subprocess.run(cmd, shell=True)
+    print("分割视频done：", "\n", " ".join(cmd))
     return videos
 
 class Reader:
