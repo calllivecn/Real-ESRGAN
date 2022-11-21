@@ -309,10 +309,11 @@ def run(args):
 
     video_save_path = output / f"{osp.splitext(input_path.name)[0]}_{args.suffix}{video_suffix}"
 
-    num_gpus = torch.cuda.device_count()
     if args.num_process_per_gpu == 1:
-        inference_video(args, input_path, video_save_path)
+        inference_video(args, str(input_path), str(video_save_path))
         return
+
+    num_gpus = torch.cuda.device_count()
 
     # 先分割视频
     videos = split_sub_video(args.num_process_per_gpu, meta, input_path, sub_video_split_dir)
@@ -327,7 +328,7 @@ def run(args):
         sub_video_save = sub_video_out_dir / f'{i:03d}{video_suffix}'
         pool.apply_async(
             inference_video,
-            args=(args, sub_video_in, sub_video_save, torch.device(i % num_gpus)),
+            args=(args, str(sub_video_in), str(sub_video_save), torch.device(i % num_gpus)),
             callback=lambda arg: pbar.update(1))
     pool.close()
     pool.join()
