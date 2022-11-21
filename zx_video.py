@@ -349,7 +349,7 @@ def run(args):
         video_save_path
     ]
     print("最后合并视频:", cmd)
-    subprocess.run(cmd)
+    subprocess.run(cmd, check=True)
 
     shutil.rmtree(sub_video_split_dir)
     shutil.rmtree(sub_video_out_dir)
