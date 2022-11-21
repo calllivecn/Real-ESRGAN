@@ -556,17 +556,14 @@ def run(args):
     put_queue = torch_Queue(8)
     get_queue = torch_Queue(8)
 
-    # p = torch_mp.Process(target=inference_video, args=(args, str(sub_video_in), str(sub_video_save), torch.device(i % num_gpus)))
-    # p.start()
-
     num_gpus = torch.cuda.device_count()
 
     # 启动GPU 进程
-    ctx = torch_mp.get_context('spawn')
-    pool = ctx.Pool(num_gpus)
+    gpu_process = []
     for i in range(num_gpus):
-        pool.apply_async(inference_video, args=(args, put_queue, get_queue, torch.device(i)))
-    pool.close()
+        p = torch_mp.Process(target=inference_video, args=(args, put_queue, get_queue, torch.device(i)))
+        p.start()
+        gpu_process.append(p)
 
     print("GPU Pool start")
 
@@ -599,9 +596,7 @@ def run(args):
     # finally cleanup
     reader.close()
     writer.close()
-
-    pool.join()
-
+    [ p.join() for p in gpu_process ]
 
 
 def main():
