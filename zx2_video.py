@@ -558,10 +558,12 @@ def run(args):
 
     num_gpus = torch.cuda.device_count()
 
+    total_process = num_gpus * args.num_process_per_gpu
+
     # 启动GPU 进程
     gpu_process = []
-    for i in range(num_gpus):
-        p = torch_mp.Process(target=inference_video, args=(args, put_queue, get_queue, torch.device(i)))
+    for i in range(total_process):
+        p = torch_mp.Process(target=inference_video, args=(args, put_queue, get_queue, torch.device(i % num_gpus)))
         p.start()
         gpu_process.append(p)
 
@@ -633,7 +635,7 @@ def main():
     parser.add_argument('--fps', type=float, default=None, help='FPS of the output video')
     parser.add_argument('--ffmpeg_bin', type=str, default='ffmpeg', help='The path to ffmpeg')
     # parser.add_argument('--extract_frame_first', action='store_true')
-    # parser.add_argument('--num_process_per_gpu', type=int, default=1, help="一个视频分成多少个并行处理")
+    parser.add_argument('--num_process_per_gpu', type=int, default=1, help="每个 GPU 的数量进程")
 
     parser.add_argument(
         '--alpha_upsampler',
