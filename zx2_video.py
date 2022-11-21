@@ -566,7 +566,9 @@ def run(args):
     pool = ctx.Pool(num_gpus)
     for i in range(num_gpus):
         pool.apply_async(inference_video, args=(args, put_queue, get_queue, torch.device(i)))
+    pool.close()
 
+    print("GPU Pool start")
 
     ###############
     #  使用队列
@@ -597,7 +599,7 @@ def run(args):
     # finally cleanup
     reader.close()
     writer.close()
-    pool.close()
+
     pool.join()
 
 
