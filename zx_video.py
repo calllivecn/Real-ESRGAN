@@ -316,6 +316,7 @@ def run(args):
 
     # 先分割视频
     videos = split_sub_video(args.num_process_per_gpu, meta, input_path, sub_video_split_dir)
+    print("split_sub_video() 处理完了")
 
 
     ctx = torch.multiprocessing.get_context('spawn')
@@ -332,6 +333,8 @@ def run(args):
             callback=lambda arg: pbar.update(1))
     pool.close()
     pool.join()
+
+    print("已经inference_vide() 处理完了？？？")
 
     # combine sub videos
     # prepare vidlist.txt
