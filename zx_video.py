@@ -1,3 +1,4 @@
+import fractions
 import argparse
 import cv2
 import glob
@@ -7,6 +8,7 @@ import os
 import shutil
 import subprocess
 import torch
+from pathlib import Path
 from basicsr.archs.rrdbnet_arch import RRDBNet
 from basicsr.utils.download_util import load_file_from_url
 from os import path as osp
@@ -25,17 +27,30 @@ except ImportError:
 
 def get_video_meta_info(video_path):
     ret = {}
+    filename = Path(video_path)
     probe = ffmpeg.probe(video_path)
     video_streams = [stream for stream in probe['streams'] if stream['codec_type'] == 'video']
     has_audio = any(stream['codec_type'] == 'audio' for stream in probe['streams'])
     ret['width'] = video_streams[0]['width']
     ret['height'] = video_streams[0]['height']
-    ret['fps'] = eval(video_streams[0]['avg_frame_rate'])
+    ret['fps'] = float(fractions.Fraction(video_streams[0]['avg_frame_rate']))
     ret['audio'] = ffmpeg.input(video_path).audio if has_audio else None
-    ret['nb_frames'] = int(video_streams[0]['nb_frames'])
+
+    ret["duration"] = video_streams[0]["duration"]
+
+    ret["suffix"] = filename.suffix
+
+    # nb_frames mp4 有 mkv 没有
+    nb_frames = video_streams[0].get('nb_frames')
+    if nb_frames is None:
+        ret['nb_frames'] = int(ret["duration"] / ret["fps"])
+    else:
+        ret["nb_frames"] = nb_frames
+
     return ret
 
 
+"""
 def get_sub_video(args, num_process, process_idx):
     if num_process == 1:
         return args.input
@@ -52,36 +67,33 @@ def get_sub_video(args, num_process, process_idx):
     print(' '.join(cmd))
     subprocess.call(' '.join(cmd), shell=True)
     return out_path
+"""
 
 
-def get_sub_video2(args, num_process, process_idx):
-    if num_process == 1:
-        return args.input
-    meta = get_video_meta_info(args.input)
+def split_sub_video(number, meta, in_path, out_path):
 
-    duration = int(meta['nb_frames'] / meta['fps'])
+    suffix = meta["suffix"]
 
-    part_time = duration // num_process
+    # 分成 num_process_per_gpu 块， 会分成多少个文件
+    time_port, d = divmod(meta['duration'] , number)
+    if d > 0:
+        videos = time_port + 1
 
-    print(f'duration: {duration}, part_time: {part_time}')
-    os.makedirs(osp.join(args.output, f'{args.video_name}_inp_tmp_videos'), exist_ok=True)
-    out_path = osp.join(args.output, f'{args.video_name}_inp_tmp_videos', f'{process_idx:03d}.mp4')
-
-    ss = f'{part_time * process_idx}'
-    if process_idx != num_process - 1:
-       to = f'{part_time * (process_idx + 1)}' 
-        cmd = [args.ffmpeg_bin, '-ss', ss, "-to", to, f'-i {args.input}', "-codec", "copy", '-async 1', out_path, '-y']
-    else:
-        cmd = [args.ffmpeg_bin, '-ss', ss, "-to", to, f'-i {args.input}', "-codec", "copy", '-async 1', out_path, '-y']
+    cmd = [
+        "ffmpeg", "-i", in_path,
+        "-f", "segment", "-segment_time", f"{time_port}s",
+        "-codec", "copy", '-async 1', out_path / f"%03d{suffix}", '-y'
+        ]
 
 
-    print(cmd)
+    print("分割视频：", cmd)
     subprocess.run(cmd, shell=True)
-    return out_path
+    return videos
 
 class Reader:
 
-    def __init__(self, args, total_workers=1, worker_idx=0):
+    #def __init__(self, args, total_workers=1, worker_idx=0):
+    def __init__(self, args, video_path):
         self.args = args
         input_type = mimetypes.guess_type(args.input)[0]
         self.input_type = 'folder' if input_type is None else input_type
@@ -89,7 +101,6 @@ class Reader:
         self.audio = None
         self.input_fps = None
         if self.input_type.startswith('video'):
-            video_path = get_sub_video(args, total_workers, worker_idx)
             self.stream_reader = (
                 ffmpeg.input(video_path).output('pipe:', format='rawvideo', pix_fmt='bgr24',
                                                 loglevel='error').run_async(
@@ -101,21 +112,6 @@ class Reader:
             self.audio = meta['audio']
             self.nb_frames = meta['nb_frames']
 
-        else:
-            if self.input_type.startswith('image'):
-                self.paths = [args.input]
-            else:
-                paths = sorted(glob.glob(os.path.join(args.input, '*')))
-                tot_frames = len(paths)
-                num_frame_per_worker = tot_frames // total_workers + (1 if tot_frames % total_workers else 0)
-                self.paths = paths[num_frame_per_worker * worker_idx:num_frame_per_worker * (worker_idx + 1)]
-
-            self.nb_frames = len(self.paths)
-            assert self.nb_frames > 0, 'empty folder'
-            from PIL import Image
-            tmp_img = Image.open(self.paths[0])
-            self.width, self.height = tmp_img.size
-        self.idx = 0
 
     def get_resolution(self):
         return self.height, self.width
@@ -140,18 +136,9 @@ class Reader:
         img = np.frombuffer(img_bytes, np.uint8).reshape([self.height, self.width, 3])
         return img
 
-    def get_frame_from_list(self):
-        if self.idx >= self.nb_frames:
-            return None
-        img = cv2.imread(self.paths[self.idx])
-        self.idx += 1
-        return img
 
     def get_frame(self):
-        if self.input_type.startswith('video'):
-            return self.get_frame_from_stream()
-        else:
-            return self.get_frame_from_list()
+        return self.get_frame_from_stream()
 
     def close(self):
         if self.input_type.startswith('video'):
@@ -196,7 +183,8 @@ class Writer:
         self.stream_writer.wait()
 
 
-def inference_video(args, video_save_path, device=None, total_workers=1, worker_idx=0):
+#def inference_video(args, video_save_path, device=None, total_workers=1, worker_idx=0):
+def inference_video(args, video_in_path, video_save_path, device=None):
     # ---------------------- determine models according to model names ---------------------- #
     args.model_name = args.model_name.split('.pth')[0]
     if args.model_name == 'RealESRGAN_x4plus':  # x4 RRDBNet model
@@ -272,7 +260,10 @@ def inference_video(args, video_save_path, device=None, total_workers=1, worker_
     else:
         face_enhancer = None
 
-    reader = Reader(args, total_workers, worker_idx)
+    # reader = Reader(args, total_workers, worker_idx)
+
+    reader = Reader(args, video_in_path) # zx
+
     audio = reader.get_audio()
     height, width = reader.get_resolution()
     fps = reader.get_fps()
@@ -303,50 +294,63 @@ def inference_video(args, video_save_path, device=None, total_workers=1, worker_
 
 
 def run(args):
-    args.video_name = osp.splitext(os.path.basename(args.input))[0]
-    video_save_path = osp.join(args.output, f'{args.video_name}_{args.suffix}.mp4')
+    meta = get_video_meta_info(args.input)
+    video_suffix = meta["suffix"]
 
-    if args.extract_frame_first:
-        tmp_frames_folder = osp.join(args.output, f'{args.video_name}_inp_tmp_frames')
-        os.makedirs(tmp_frames_folder, exist_ok=True)
-        os.system(f'ffmpeg -i {args.input} -qscale:v 1 -qmin 1 -qmax 1 -vsync 0  {tmp_frames_folder}/frame%08d.png')
-        args.input = tmp_frames_folder
+    output = Path(args.output)
+
+    input_path = Path(args.input)
+    sub_video_split_dir = input_path.parent / (input_path.name + "_split")
+    sub_video_split_dir.mkdir(exist=True)
+
+    sub_video_out_dir = input_path.parent / (input_path.name + "_sub_out")
+    sub_video_out_dir.mkdir(exist=True)
+
+    video_save_path = output / f"{osp.splitext(input_path.name)[0]}_{args.suffix}{video_suffix}"
 
     num_gpus = torch.cuda.device_count()
-    num_process = num_gpus * args.num_process_per_gpu
-    if num_process == 1:
-        inference_video(args, video_save_path)
-        return
+    # num_process = num_gpus * args.num_process_per_gpu
+    # if num_process == 1:
+        # inference_video(args, video_save_path)
+        # return
+
+    # 先分割视频
+    videos = split_sub_video(args.num_process_per_gpu, meta, input_path, sub_video_split_dir)
 
     ctx = torch.multiprocessing.get_context('spawn')
-    pool = ctx.Pool(num_process)
+    pool = ctx.Pool(args.num_process_per_gpu)
+
     os.makedirs(osp.join(args.output, f'{args.video_name}_out_tmp_videos'), exist_ok=True)
-    pbar = tqdm(total=num_process, unit='sub_video', desc='inference')
-    for i in range(num_process):
-        sub_video_save_path = osp.join(args.output, f'{args.video_name}_out_tmp_videos', f'{i:03d}.mp4')
+    pbar = tqdm(total=videos, unit='sub_video', desc='inference')
+
+    for i in range(videos):
+        sub_video_in = sub_video_split_dir / f'{i:03d}{video_suffix}'
+        sub_video_save = sub_video_out_dir / f'{i:03d}{video_suffix}'
         pool.apply_async(
             inference_video,
-            args=(args, sub_video_save_path, torch.device(i % num_gpus), num_process, i),
+            args=(args, sub_video_in, sub_video_save, torch.device(i % num_gpus)),
             callback=lambda arg: pbar.update(1))
     pool.close()
     pool.join()
 
     # combine sub videos
     # prepare vidlist.txt
-    with open(f'{args.output}/{args.video_name}_vidlist.txt', 'w') as f:
-        for i in range(num_process):
-            f.write(f'file \'{args.video_name}_out_tmp_videos/{i:03d}.mp4\'\n')
+    vidlist = sub_video_out_dir / "vidlist.txt"
+    with open(vidlist, 'w') as f:
+        for i in range(videos):
+            video = sub_video_out_dir / f"{i:03d}{video_suffix}"
+            f.write(f"file {video}\n")
 
     cmd = [
-        args.ffmpeg_bin, '-f', 'concat', "-auto_convert", "1", '-safe', '0', '-i', f'{args.output}/{args.video_name}_vidlist.txt', '-c',
-        'copy', f'{video_save_path}'
+        args.ffmpeg_bin, '-f', 'concat', '-safe', '0',
+        '-i', vidlist, '-c', 'copy',
+        video_save_path
     ]
-    print(' '.join(cmd))
-    subprocess.call(cmd)
-    shutil.rmtree(osp.join(args.output, f'{args.video_name}_out_tmp_videos'))
-    if osp.exists(osp.join(args.output, f'{args.video_name}_inp_tmp_videos')):
-        shutil.rmtree(osp.join(args.output, f'{args.video_name}_inp_tmp_videos'))
-    os.remove(f'{args.output}/{args.video_name}_vidlist.txt')
+    print(cmd)
+    subprocess.run(cmd)
+
+    shutil.rmtree(sub_video_split_dir)
+    shutil.rmtree(sub_video_out_dir)
 
 
 def main():
@@ -382,8 +386,8 @@ def main():
         '--fp32', action='store_true', help='Use fp32 precision during inference. Default: fp16 (half precision).')
     parser.add_argument('--fps', type=float, default=None, help='FPS of the output video')
     parser.add_argument('--ffmpeg_bin', type=str, default='ffmpeg', help='The path to ffmpeg')
-    parser.add_argument('--extract_frame_first', action='store_true')
-    parser.add_argument('--num_process_per_gpu', type=int, default=1)
+    # parser.add_argument('--extract_frame_first', action='store_true')
+    parser.add_argument('--num_process_per_gpu', type=int, default=1, help="一个视频分成多少个并行处理")
 
     parser.add_argument(
         '--alpha_upsampler',
@@ -410,15 +414,7 @@ def main():
         os.system(f'ffmpeg -i {args.input} -codec copy {mp4_path}')
         args.input = mp4_path
 
-    if args.extract_frame_first and not is_video:
-        args.extract_frame_first = False
-
     run(args)
-
-    if args.extract_frame_first:
-        tmp_frames_folder = osp.join(args.output, f'{args.video_name}_inp_tmp_frames')
-        shutil.rmtree(tmp_frames_folder)
-
 
 if __name__ == '__main__':
     main()
