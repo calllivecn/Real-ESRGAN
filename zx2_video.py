@@ -573,7 +573,7 @@ def run(args):
     ###############
 
     def put2inference(q, reader):
-        while (frame := reader.frame()) is not None:
+        while (frame := reader.get_frame()) is not None:
             q.put(frame)
 
         q.put(None)
