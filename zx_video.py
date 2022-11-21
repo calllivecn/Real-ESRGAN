@@ -272,6 +272,7 @@ def inference_video(args, video_in_path, video_save_path, device=None):
     pbar = tqdm(total=len(reader), unit='frame', desc='inference')
     while True:
         img = reader.get_frame()
+        print("开始推理了。 get_freame() line:275")
         if img is None:
             break
 
@@ -316,8 +317,6 @@ def run(args):
 
     # 先分割视频
     videos = split_sub_video(args.num_process_per_gpu, meta, input_path, sub_video_split_dir)
-    print("split_sub_video() 处理完了")
-
 
     ctx = torch.multiprocessing.get_context('spawn')
     pool = ctx.Pool(args.num_process_per_gpu)
@@ -349,7 +348,7 @@ def run(args):
         '-i', vidlist, '-c', 'copy',
         video_save_path
     ]
-    print(cmd)
+    print("最后合并视频:", cmd)
     subprocess.run(cmd)
 
     shutil.rmtree(sub_video_split_dir)
