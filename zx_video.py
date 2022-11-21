@@ -301,10 +301,10 @@ def run(args):
 
     input_path = Path(args.input)
     sub_video_split_dir = input_path.parent / (input_path.name + "_split")
-    sub_video_split_dir.mkdir(exist=True)
+    sub_video_split_dir.mkdir(exist_ok=True)
 
     sub_video_out_dir = input_path.parent / (input_path.name + "_sub_out")
-    sub_video_out_dir.mkdir(exist=True)
+    sub_video_out_dir.mkdir(exist_ok=True)
 
     video_save_path = output / f"{osp.splitext(input_path.name)[0]}_{args.suffix}{video_suffix}"
 
