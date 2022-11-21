@@ -82,7 +82,7 @@ class RealESRGANer():
             loadnet = self.dni(model_path[0], model_path[1], dni_weight)
         else:
             # if the model_path starts with https, it will first download models to the folder: weights
-            if model_path.startswith('https://'):
+            if str(model_path).startswith('https://'):
                 model_path = load_file_from_url(
                     url=model_path, model_dir=ROOT_DIR_utils / 'weights', progress=True, file_name=None)
             loadnet = torch.load(model_path, map_location=torch.device('cpu'))
