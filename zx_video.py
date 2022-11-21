@@ -45,7 +45,7 @@ def get_video_meta_info(video_path):
     if nb_frames is None:
         ret['nb_frames'] = int(ret["duration"] / ret["fps"])
     else:
-        ret["nb_frames"] = nb_frames
+        ret["nb_frames"] = int(nb_frames)
 
     return ret
 
