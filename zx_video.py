@@ -77,12 +77,12 @@ def split_sub_video(number, meta, in_path, out_path):
     # 分成 num_process_per_gpu 块， 会分成多少个文件
     time_port, d = divmod(round(float(meta['duration'])) , number)
     if d > 0:
-        videos = time_port + 1
+        videos = number + 1
 
     cmd = [
         "ffmpeg", "-i", in_path,
         "-f", "segment", "-segment_time", f"{time_port}s",
-        "-codec", "copy", '-async 1', out_path / f"%03d{suffix}", '-y'
+        "-codec", "copy", '-async', '1', out_path / f"%03d{suffix}", '-y'
         ]
 
 
@@ -317,10 +317,10 @@ def run(args):
     # 先分割视频
     videos = split_sub_video(args.num_process_per_gpu, meta, input_path, sub_video_split_dir)
 
+
     ctx = torch.multiprocessing.get_context('spawn')
     pool = ctx.Pool(args.num_process_per_gpu)
 
-    os.makedirs(osp.join(args.output, f'{args.video_name}_out_tmp_videos'), exist_ok=True)
     pbar = tqdm(total=videos, unit='sub_video', desc='inference')
 
     for i in range(videos):
