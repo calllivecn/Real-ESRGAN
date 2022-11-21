@@ -171,7 +171,7 @@ class Writer:
                 ffmpeg.input('pipe:', format='rawvideo', pix_fmt='bgr24', s=f'{out_width}x{out_height}',
                              framerate=fps).output(
                                  video_save_path, pix_fmt='yuv420p', vcodec='libx264',
-                                 loglevel='error').overwrite_output().run_async(
+                                 loglevel='info').overwrite_output().run_async(
                                      pipe_stdin=True, pipe_stdout=True, cmd=args.ffmpeg_bin))
 
     def write_frame(self, frame):
@@ -310,10 +310,9 @@ def run(args):
     video_save_path = output / f"{osp.splitext(input_path.name)[0]}_{args.suffix}{video_suffix}"
 
     num_gpus = torch.cuda.device_count()
-    # num_process = num_gpus * args.num_process_per_gpu
-    # if num_process == 1:
-        # inference_video(args, video_save_path)
-        # return
+    if args.num_process_per_gpu == 1:
+        inference_video(args, input_path, video_save_path)
+        return
 
     # 先分割视频
     videos = split_sub_video(args.num_process_per_gpu, meta, input_path, sub_video_split_dir)
