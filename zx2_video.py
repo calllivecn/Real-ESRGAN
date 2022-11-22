@@ -573,7 +573,7 @@ def run(args):
     def next_frame(seq, stash, seq_frame):
         heapq.heappush(stash, seq_frame)
         frames = []
-        while seq == stash[0][0]:
+        while len(stash) > 0 and seq == stash[0][0]:
             _, frame = heapq.heappop(stash)
             frames.append(frame)
             seq += 1
@@ -597,10 +597,7 @@ def run(args):
             # 保证帧是有序连续的输出到ffmpeg
             seq, frames = next_frame(seq, stash, seq_frame)
 
-            # [writer.write_frame(frame) for frame in frames]
-            for frame in frames:
-                print(f"写入第{seq}帧")
-                writer.write_frame(frame)
+            [writer.write_frame(frame) for frame in frames]
 
             pbar.update(1)
 
