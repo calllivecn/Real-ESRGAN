@@ -1,5 +1,7 @@
 import os
+import sys
 import math
+import heapq
 import shutil
 import argparse
 import mimetypes
@@ -433,7 +435,6 @@ class Writer:
         self.stream_writer.wait()
 
 
-
 def inference_video(args, put_queue, get_queue, device=None):
     # ---------------------- determine models according to model names ---------------------- #
     args.model_name = args.model_name.split('.pth')[0]
@@ -519,6 +520,8 @@ def inference_video(args, put_queue, get_queue, device=None):
             print(f"inference_video() pid: {os.getpid()} 退出")
             break
 
+        seq, img = img
+
         try:
             if args.face_enhance:
                 _, _, output = face_enhancer.enhance(img, has_aligned=False, only_center_face=False, paste_back=True)
@@ -527,8 +530,9 @@ def inference_video(args, put_queue, get_queue, device=None):
         except RuntimeError as error:
             print('Error', error)
             print('If you encounter CUDA out of memory, try to set --tile with a smaller number.')
+            sys.exit(1)
         else:
-            get_queue.put(output)
+            get_queue.put((seq, output))
 
         torch.cuda.synchronize(device)
 
@@ -566,16 +570,32 @@ def run(args):
     #  使用队列
     ###############
 
+    def next_frame(seq, stash, seq_frame):
+        heapq.heappush(stash, seq_frame)
+        frames = []
+        while len(stash) > 0 and (seq + 1) == stash[0][0]:
+            seq, frame = heapq.heappop(stash)
+            frames.append(frame)
+
+        return seq, frames
+
+
     def put2inference(q, reader):
+        seq = 0
         while (frame := reader.get_frame()) is not None:
-            q.put(frame)
+            q.put((seq, frame))
+            seq += 1
 
         q.put(None)
 
     def get4inference(q, writer):
         pbar = tqdm(total=len(reader), unit='frame', desc='inference')
-        while (frame := q.get()) is not None:
-            writer.write_frame(frame)
+        seq = 0
+        stash = []
+        while (seq_frame := q.get()) is not None:
+            # 保证帧是有序输出到ffmpeg的
+            seq, frames = next_frame(seq, stash, seq_frame)
+            [writer.write_frame(frame) for frame in frames]
             pbar.update(1)
 
     reader = Reader(args, input_path) # zx
