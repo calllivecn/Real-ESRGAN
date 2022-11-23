@@ -2,11 +2,9 @@ import os
 import sys
 import math
 import heapq
-import shutil
 import argparse
 import mimetypes
 import fractions
-import subprocess
 from pathlib import Path
 
 import cv2
@@ -317,28 +315,6 @@ def get_video_meta_info(video_path):
 
     return ret
 
-
-def split_sub_video(number, meta, in_path, out_path):
-
-    suffix = meta["suffix"]
-
-    # 分成 num_process_per_gpu 块， 会分成多少个文件
-    time_port, d = divmod(round(float(meta['duration'])) , number)
-    if d > 0:
-        videos = number + 1
-    else:
-        videos = number
-
-    cmd = [
-        "ffmpeg", "-hide_banner", "-i", str(in_path),
-        "-f", "segment", "-segment_time", f"{time_port}s",
-        "-codec", "copy", "-y", str(out_path / f"%03d{suffix}")]
-
-
-    print("分割视频start：", "\n", " ".join(cmd))
-    subprocess.run(cmd, check=True)
-    print("分割视频done：", "\n", " ".join(cmd))
-    return videos
 
 class Reader:
 
