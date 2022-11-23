@@ -20,7 +20,7 @@ from basicsr.utils.download_util import load_file_from_url
 from torch.nn import functional as F
 from tqdm import tqdm
 
-from realesrgan import RealESRGANer
+# from realesrgan import RealESRGANer
 from realesrgan.archs.srvgg_arch import SRVGGNetCompact
 
 try:
