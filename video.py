@@ -385,7 +385,8 @@ class Writer:
             print('You are generating video that is larger than 4K, which will be very slow due to IO speed.',
                   'We highly recommend to decrease the outscale(aka, -s).')
 
-        encoder = "libx265"
+        # encoder = "libx265"
+        encoder = args.encoder
 
         if audio is not None:
             self.stream_writer = (
@@ -643,6 +644,7 @@ def main():
         '--fp32', action='store_true', help='Use fp32 precision during inference. Default: fp16 (half precision).')
     parser.add_argument('--fps', type=float, default=None, help='FPS of the output video')
     parser.add_argument('--ffmpeg_bin', type=str, default='ffmpeg', help='The path to ffmpeg')
+    parser.add_argument('--encoder', type=str, default='libx265', help='默认使用CPU(慢), 可以使用GPU(hevc_nvenc)')
     # parser.add_argument('--extract_frame_first', action='store_true')
     parser.add_argument('--num_process_per_gpu', type=int, default=1, help="每个 GPU 的数量进程")
 
