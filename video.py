@@ -290,6 +290,8 @@ class RealESRGANer():
 
 # =================================================
 
+VIDEO_CONTAINER = (".mp4", ".mkv", ".flv")
+
 
 def get_video_meta_info(video_path):
     ret = {}
@@ -300,18 +302,25 @@ def get_video_meta_info(video_path):
     ret['width'] = video_streams[0]['width']
     ret['height'] = video_streams[0]['height']
     ret['audio'] = ffmpeg.input(video_path).audio if has_audio else None
+    ret['fps'] = float(fractions.Fraction(video_streams[0]['avg_frame_rate']))
 
     ret["suffix"] = filename.suffix
 
-    #  duration, fps, nb_frames mp4 有 mkv 没有
-    ret["duration"] = video_streams[0]["duration"]
-    ret['fps'] = float(fractions.Fraction(video_streams[0]['avg_frame_rate']))
+    if not filename.suffix in VIDEO_CONTAINER:
+        print(f"目前只支持 {VIDEO_CONTAINER} 格式, 可以先自行使用ffmpeg工具转换格式。")
+        sys.exit(1)
 
-    nb_frames = video_streams[0].get('nb_frames')
-    if nb_frames is None:
+    if filename.suffix.lower() == ".mp4":
+        ret["duration"] = video_streams[0]["duration"]
+        ret["nb_frames"] = int(video_streams[0].get('nb_frames'))
+
+    elif filename.suffix.lower() == ".mkv":
+        ret["duration"] = video_streams[0]["tags"]["DURATION"]
         ret['nb_frames'] = int(ret["duration"] / ret["fps"])
-    else:
-        ret["nb_frames"] = int(nb_frames)
+
+    elif filename.suffix.lower() == ".flv":
+        ret["duration"] = video_streams[0]["duration"]
+        ret['nb_frames'] = int(ret["duration"] / ret["fps"])
 
     return ret
 
