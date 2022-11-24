@@ -315,7 +315,8 @@ def get_video_meta_info(video_path):
         ret["nb_frames"] = int(video_streams[0].get('nb_frames'))
 
     elif filename.suffix.lower() == ".mkv":
-        ret["duration"] = video_streams[0]["tags"]["DURATION"]
+        format = ffmpeg.probe(video_path, format=True)
+        ret["duration"] = format["DURATION"]
         ret['nb_frames'] = int(ret["duration"] / ret["fps"])
 
     return ret
