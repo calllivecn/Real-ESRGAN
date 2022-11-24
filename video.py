@@ -290,7 +290,7 @@ class RealESRGANer():
 
 # =================================================
 
-VIDEO_CONTAINER = (".mp4", ".mkv", ".flv")
+VIDEO_CONTAINER = (".mp4", ".mkv")
 
 
 def get_video_meta_info(video_path):
@@ -316,10 +316,6 @@ def get_video_meta_info(video_path):
 
     elif filename.suffix.lower() == ".mkv":
         ret["duration"] = video_streams[0]["tags"]["DURATION"]
-        ret['nb_frames'] = int(ret["duration"] / ret["fps"])
-
-    elif filename.suffix.lower() == ".flv":
-        ret["duration"] = video_streams[0]["duration"]
         ret['nb_frames'] = int(ret["duration"] / ret["fps"])
 
     return ret
