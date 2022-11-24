@@ -311,13 +311,12 @@ def get_video_meta_info(video_path):
         sys.exit(1)
 
     if filename.suffix.lower() == ".mp4":
-        ret["duration"] = video_streams[0]["duration"]
+        ret["duration"] = float(video_streams[0]["duration"])
         ret["nb_frames"] = int(video_streams[0].get('nb_frames'))
 
     elif filename.suffix.lower() == ".mkv":
-        format = ffmpeg.probe(video_path, format=True)
-        ret["duration"] = format["DURATION"]
-        ret['nb_frames'] = int(ret["duration"] / ret["fps"])
+        ret["duration"] = float(probe["format"]["duration"])
+        ret['nb_frames'] = round(ret["duration"] * ret["fps"])
 
     return ret
 
