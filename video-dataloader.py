@@ -768,68 +768,23 @@ def run(args):
     # 启动GPU 进程
     process = []
 
+    # 使用和dataloader batch_size 相同的进程数
+    post_process_multi = ModelPostPorcess(pool=8)
+    # post_process_multi = ModelPostPorcess(pool=args.batch_size)
+
+
     """
     for i in range(total_process):
         p = torch_mp.Process(target=inference_video, args=(args, put_queue, get_queue, torch.device(i % num_gpus)))
         p.start()
         process.append(p)
 
-    print("GPU Pool start")
+    print("model Pool start")
     """
-
-    # 使用和dataloader batch_size 相同的进程数
-    post_process_multi = ModelPostPorcess(pool=8)
-    # post_process_multi = ModelPostPorcess(pool=args.batch_size)
 
     p = torch_mp.Process(target=inference_video, args=(args, reader, post_process_multi), name="CUDA连接处理器") # torch.device(i % num_gpus)))
     p.start()
     process.append(p)
-
-    """
-    ###############
-    #  使用队列
-    ###############
-
-    def next_frame(seq, stash, seq_frame):
-        heapq.heappush(stash, seq_frame)
-        frames = []
-        while len(stash) > 0 and seq == stash[0][0]:
-            _, frame = heapq.heappop(stash)
-            frames.append(frame)
-            seq += 1
-
-        return seq, frames
-
-
-    def put2inference(q, reader):
-        seq = 0
-        while (frame := reader.get_frame()) is not None:
-            q.put((seq, frame))
-            seq += 1
-
-        q.put(None)
-
-    def get4inference(q, writer):
-        # pbar = tqdm(total=len(reader), unit='frame', desc='inference')
-        # pbar = tqdm(unit='frame', desc='inference')
-        seq = 0
-        stash = []
-        t1 = time.time()
-        c = 0
-        while (seq_frame := q.get()) is not None:
-            # 保证帧是有序连续的输出到ffmpeg
-            seq, frames = next_frame(seq, stash, seq_frame)
-
-            [writer.write_frame(frame) for frame in frames]
-            t2 = time.time()
-            t = t2 - t1
-            c += len(frames)
-            if t >= 1:
-                print(f"当前处理速度： {round(c/t, 1)} frame/s")
-                c = 0
-                t1 = t2
-            # pbar.update(1)
-    """
 
     # 开始 main()
     # reader = Reader(args, input_path) # zx
