@@ -6,7 +6,9 @@ import heapq
 import argparse
 import mimetypes
 import fractions
+import threading
 from pathlib import Path
+
 
 import cv2
 import torch
@@ -42,6 +44,9 @@ except ImportError:
 # ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT_DIR_utils = Path(__file__).parent
 
+print(f"""{torch_mp.get_start_method("spawn")=}""")
+# torch_mp.set_start_method("spawn")
+
 
 class RealESRGANer():
     """A helper class for upsampling images with RealESRGAN.
@@ -75,6 +80,12 @@ class RealESRGANer():
         self.pre_pad = pre_pad
         self.mod_scale = None
         self.half = half
+
+
+        self.img_mode = 'L'
+        self.max_range = None
+        self.w_input = None
+        self.h_input = None
 
         # initialize model
         if gpu_id:
@@ -225,6 +236,7 @@ class RealESRGANer():
             output = output[:, :, 0:h - self.pre_pad * self.scale, 0:w - self.pre_pad * self.scale]
         return output
 
+
     # @torch.no_grad()
     # def enhance(self, img, outscale=None, alpha_upsampler='realesrgan'):
     def enhance_dataloader_pre(self, img):
@@ -260,8 +272,18 @@ class RealESRGANer():
 
         return self.img
 
+    #
+    def gpu2cpu(self, img):
+        output_img = self.post_process(img)
+        # 在这里把数据从gpu 拿回cpu 的, 从GPU拿回数据，这个操作要在同dataloader 进程中。
+        output_img = output_img.data.squeeze().float().cpu().clamp_(0, 1).numpy()
+        return output_img
 
-    def enhance_dataloader_post(self, img, outscale=None):
+
+    def enhance_dataloader_post(self, output_img, outscale=None):
+        """
+        这里拿到的 img 是 self.post_process()之后， 从gpu 拿回来之后的
+        """
 
         """
         if self.tile_size > 0:
@@ -269,15 +291,6 @@ class RealESRGANer():
         else:
             self.process()
         """
-
-
-        print(f"进入 enhance_dataloader_post() 时 img 的位置：{img.size()=} {img.device=}")
-
-        output_img = self.post_process(img)
-
-        # 在这里把数据从gpu 拿回cpu 的
-        output_img = output_img.data.squeeze().float().cpu().clamp_(0, 1).numpy()
-
 
         output_img = np.transpose(output_img[[2, 1, 0], :, :], (1, 2, 0))
         if self.img_mode == 'L':
@@ -287,15 +300,16 @@ class RealESRGANer():
         if self.img_mode == 'RGBA':
             if self.alpha_upsampler == 'realesrgan':
                 self.pre_process(self.alpha)
+
                 """
+                # 这一步先入着,以后在处理
                 if self.tile_size > 0:
                     self.tile_process()
                 else:
                     self.process()
                 """
 
-                output_alpha = self.post_process()
-                output_alpha = output_alpha.data.squeeze().float().cpu().clamp_(0, 1).numpy()
+                output_alpha = output_img
                 output_alpha = np.transpose(output_alpha[[2, 1, 0], :, :], (1, 2, 0))
                 output_alpha = cv2.cvtColor(output_alpha, cv2.COLOR_BGR2GRAY)
             else:  # use the cv2 resize for alpha channel
@@ -468,6 +482,122 @@ class StreamData(IterableDataset):
             yield img #.to(torch.device("cuda"))
 
 
+# 后处理在单核性能不行， 使用 多进程处理。
+class ModelPostPorcess:
+
+    def __init__(self, func=None, pool=4, queue_size=16):
+        """
+        func: 必须是 func(task)
+        """
+
+        self._alived = True
+
+        self.func = func
+
+        cpu_count = os.cpu_count()
+        if pool > cpu_count:
+            pool = cpu_count
+        else:
+            self.pool = pool
+
+        self.pools = []
+
+        self.queue_size = queue_size
+        # self.in_queue = mp.Queue(pool)
+        # self.out_queue = mp.Queue(pool)
+        self.in_queue = torch_Queue(self.queue_size)
+        self.out_queue = torch_Queue(self.queue_size)
+        self.pull_queue = torch_Queue(self.queue_size)
+
+        self.in_seq = 0
+        self.out_seq = 0
+        self.pull_seq = 0
+        self.stash = []
+
+        if self.func is not None:
+            self.submit_func(self.func)
+
+
+    def submit_func(self, func):
+        if self.func is not None:
+            raise ValueError("函数已定义")
+        self.func = func
+
+        for i in range(self.pool):
+            p = torch_mp.Process(target=self.__proc, name="后处理池", daemon=True)
+            p.start()
+            self.pools.append(p)
+
+        th = threading.Thread(target=self.next_result, daemon=True)
+        th.start()
+
+        self.pools.append(th)
+
+    def push(self, task):
+        # print(f"push() ： {self.in_seq=}")
+        if task is None:
+            self.in_queue.put(None)
+            return
+
+        self.in_queue.put((self.in_seq, task))
+        self.in_seq += 1
+
+    def pull(self):
+        result = self.pull_queue.get()
+        if result is None:
+            self._alived = False
+
+        print(f"pull() ： {self.pull_seq=}")
+        self.pull_seq += 1
+
+        return result
+
+
+    def next_result(self):
+        """
+        用来保证，任务是有序且连续的进来，和出去的。 self.stash 暂存区
+        seq_frames: (seq, task)
+        """
+        while True:
+            seq_frame = self.out_queue.get()
+
+            if seq_frame is None:
+                break
+
+            heapq.heappush(self.stash, seq_frame)
+
+            frames = []
+            while len(self.stash) > 0 and self.out_seq == self.stash[0][0]:
+                _, frame = heapq.heappop(self.stash)
+                frames.append(frame)
+                self.out_seq += 1
+
+            [self.pull_queue.put(frame) for frame in frames]
+
+
+    def join(self):
+        for th in self.pools:
+            th.join()
+
+
+    def __proc(self):
+        while True:
+            seq_task = self.in_queue.get()
+
+            if seq_task is None:
+                self.out_queue.put(None)
+                break
+
+            seq, task = seq_task
+
+            result = self.func(task)
+
+            self.out_queue.put((seq, result))
+
+
+
+    def is_alived(self):
+        return self._alived
 
 
 # def inference_video(args, put_queue, get_queue, device=None):
@@ -548,6 +678,8 @@ def inference_video(args, reader, get_queue, device=None):
     else:
         face_enhancer = None
 
+
+
     my_dataset = StreamData(reader, upsampler)
     video_frame_loader = DataLoader(
         my_dataset,
@@ -558,11 +690,8 @@ def inference_video(args, reader, get_queue, device=None):
 
     print(f"inference_video() pid: {os.getpid()} 启动")
 
+    INIT=True
 
-    # upsampler.model_bak = upsampler.model
-    # upsampler.model = torch.nn.DataParallel(upsampler.model)
-
-    seq = 0
     for imgs in video_frame_loader:
         # print(f"{imgs.size()=}")
         if imgs is None:
@@ -574,6 +703,12 @@ def inference_video(args, reader, get_queue, device=None):
 
         imgs.to(upsampler.device)
 
+
+        # 视频长宽信息，需要在预处理之后 在启动进程，才会有
+        if INIT:
+            get_queue.submit_func(lambda img: upsampler.enhance_dataloader_post(img, args.outscale))
+            INIT = False
+
         try:
             # 这个先没支持 args.face_enhance 是 False
             if args.face_enhance:
@@ -582,27 +717,30 @@ def inference_video(args, reader, get_queue, device=None):
                 # output, _ = upsampler.enhance(img, outscale=args.outscale)
                 outputs = upsampler.process(imgs)
         except RuntimeError as error:
-            # print('Error', error)
+            print('Error', error)
             print('If you encounter CUDA out of memory, try to set --tile with a smaller number.')
-            raise error
+            # raise error
             sys.exit(1)
         else:
-            img_batch = len(imgs)
-            print(f"后处理时 imgs 的位置：{imgs.size()=} {imgs.device=}")
-            img_i = 0
-            for i in range(seq, seq + img_batch):
+            # print(f"后处理时 outputs 的位置：{outputs.size()=} {len(outputs)=} {outputs.device=}")
+            l = len(outputs)
+            for i in range(l):
                 # 后处理
-                # print(f"{outputs.size()=} {args.outscale=}")
-                output, _ = upsampler.enhance_dataloader_post(outputs[img_i], outscale=args.outscale)
-                get_queue.put((i, output))
-                img_i += 1
+                img = upsampler.gpu2cpu(outputs[i])
 
-            seq += img_batch
+                # 这里需要传到一个队列，进行多进程处理在返回。
+                # output, _ = upsampler.enhance_dataloader_post(outputs[img_i], outscale=args.outscale)
+                get_queue.push(img)
 
         # torch.cuda.synchronize(device)
 
+
+
+    post_process_multi = get_queue
+    post_process_multi.push(None)
+    post_process_multi.join()
     # put_queue.close()
-    get_queue.close()
+    # get_queue.close()
 
 
 def run(args):
@@ -639,10 +777,15 @@ def run(args):
     print("GPU Pool start")
     """
 
-    p = torch_mp.Process(target=inference_video, args=(args, reader, get_queue)) # torch.device(i % num_gpus)))
+    # 使用和dataloader batch_size 相同的进程数
+    post_process_multi = ModelPostPorcess(pool=8)
+    # post_process_multi = ModelPostPorcess(pool=args.batch_size)
+
+    p = torch_mp.Process(target=inference_video, args=(args, reader, post_process_multi), name="CUDA连接处理器") # torch.device(i % num_gpus)))
     p.start()
     process.append(p)
 
+    """
     ###############
     #  使用队列
     ###############
@@ -686,6 +829,7 @@ def run(args):
                 c = 0
                 t1 = t2
             # pbar.update(1)
+    """
 
     # 开始 main()
     # reader = Reader(args, input_path) # zx
@@ -698,8 +842,21 @@ def run(args):
     # p1 = torch_mp.Process(target=put2inference, args=(put_queue, reader))
     # p1.start()
 
-    p2 = torch_mp.Process(target=get4inference, args=(get_queue, writer))
-    p2.start()
+    # p2 = torch_mp.Process(target=get4inference, args=(get_queue, writer))
+    # p2.start()
+
+    c = 0
+    t1 = time.time()
+    while (frame := post_process_multi.pull()) is not None:
+        frame, img_mode = frame
+        writer.write_frame(frame)
+        t2 = time.time()
+        t = t2 - t1
+        c += 1
+        if t >= 1:
+            print(f"当前处理速度： {round(c/t, 1)} frame/s")
+            c = 0
+            t1 = t2
 
     # 等待GPU Pool 退出
     [ p.join() for p in process ]
@@ -708,7 +865,7 @@ def run(args):
     get_queue.put(None)
 
     # p1.join()
-    p2.join()
+    # p2.join()
 
     print("已经inference_vide() 处理完了")
 
