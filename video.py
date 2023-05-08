@@ -576,14 +576,17 @@ def run(args):
         # pbar = tqdm(total=len(reader), unit='frame', desc='inference')
         seq = 0
         stash = []
-        stash = []
-        t1 = time.time()
-        c = 0
+
+        # t1 = time.time()
+        # c = 0
+
+        pbar = tqdm(total=len(reader), unit='frame', desc='inference')
         while (seq_frame := q.get()) is not None:
             # 保证帧是有序连续的输出到ffmpeg
             seq, frames = next_frame(seq, stash, seq_frame)
 
             [writer.write_frame(frame) for frame in frames]
+            """
             t2 = time.time()
             t = t2 - t1
             c += len(frames)
@@ -591,8 +594,8 @@ def run(args):
                 print(f"当前处理速度： {round(c/t, 1)} frame/s")
                 c = 0
                 t1 = t2
-
-            # pbar.update(1)
+            """
+            pbar.update(len(frames))
 
     reader = Reader(args, input_path) # zx
     audio = reader.get_audio()
