@@ -4,6 +4,7 @@ import time
 import math
 import heapq
 import argparse
+import threading
 import mimetypes
 import fractions
 from pathlib import Path
@@ -603,10 +604,12 @@ def run(args):
     fps = reader.get_fps()
     writer = Writer(args, audio, height, width, str(video_save_path), fps)
 
-    p1 = torch_mp.Process(target=put2inference, args=(put_queue, reader))
+    # p1 = torch_mp.Process(target=put2inference, args=(put_queue, reader))
+    p1 = threading.Thread(target=put2inference, args=(put_queue, reader))
     p1.start()
 
-    p2 = torch_mp.Process(target=get4inference, args=(get_queue, writer))
+    # p2 = torch_mp.Process(target=get4inference, args=(get_queue, writer))
+    p2 = threading.Thread(target=get4inference, args=(get_queue, writer))
     p2.start()
 
     # 等待GPU Pool 退出
