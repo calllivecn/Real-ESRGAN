@@ -9,7 +9,7 @@ import mimetypes
 import fractions
 from pathlib import Path
 
-import cv2
+# import cv2
 import numpy as np
 
 import torch
@@ -362,7 +362,7 @@ class Reader:
 
         if self.input_type.startswith('video'):
             self.stream_reader = (ffmpeg.input(video_path)
-                .output('pipe:', format='rawvideo', pix_fmt='bgr24', loglevel='error')
+                .output('pipe:', format='rawvideo', pix_fmt='rgb24', loglevel='error')
                 .run_async(pipe_stdin=True, pipe_stdout=True, cmd=args.ffmpeg_bin))
 
             meta = get_video_meta_info(video_path)
@@ -386,9 +386,6 @@ class Reader:
             raise ValueError("没有拿到视频帧率fps")
 
 
-    def get_audio(self):
-        return self.audio
-
     def __len__(self):
         return self.nb_frames
 
@@ -411,7 +408,7 @@ class Reader:
 
 class Writer:
 
-    def __init__(self, args, audio, height, width, video_save_path, fps):
+    def __init__(self, args, reader: Reader, height, width, video_save_path, fps):
         out_width, out_height = int(width * args.outscale), int(height * args.outscale)
         if out_height > 2160:
             print('You are generating video that is larger than 4K, which will be very slow due to IO speed.',
@@ -420,16 +417,16 @@ class Writer:
         # encoder = "libx265"
         encoder = args.encoder
 
-        if audio is not None:
+        if reader.audio is not None:
             self.stream_writer = (
-                ffmpeg.input('pipe:', format='rawvideo', pix_fmt='bgr24', s=f'{out_width}x{out_height}', framerate=fps)
-                .output(audio, video_save_path, pix_fmt='yuv420p', rc="constqp", level="6", vcodec=encoder, loglevel='error', acodec='copy')
+                ffmpeg.input('pipe:', format='rawvideo', pix_fmt='rgb24', s=f'{out_width}x{out_height}', framerate=fps)
+                .output(reader.audio, video_save_path, pix_fmt='yuv420p', rc="constqp", level="6", vcodec=encoder, loglevel='error', acodec='copy')
                 .overwrite_output()
                 .run_async(pipe_stdin=True, pipe_stdout=True, cmd=args.ffmpeg_bin)
                 )
         else:
             self.stream_writer = (
-                ffmpeg.input('pipe:', format='rawvideo', pix_fmt='bgr24', s=f'{out_width}x{out_height}', framerate=fps)
+                ffmpeg.input('pipe:', format='rawvideo', pix_fmt='rgb24', s=f'{out_width}x{out_height}', framerate=fps)
                 .output(video_save_path, pix_fmt='yuv420p', rc="constqp", level="6", vcodec=encoder, loglevel='error')
                 .overwrite_output()
                 .run_async(pipe_stdin=True, pipe_stdout=True, cmd=args.ffmpeg_bin)
@@ -485,7 +482,7 @@ def inference_video(args, put_queue, get_queue, device=None):
     # ---------------------- determine model paths ---------------------- #
     # model_path = os.path.join('weights', args.model_name + '.pth')
     # 模型在当前文件，目录的 weights/ 下面
-    weights = Path('weights')
+    weights = ROOT_DIR_utils / 'weights'
     model_path = weights / (args.model_name + '.pth')
 
 
@@ -617,10 +614,9 @@ def run(args):
             pbar.update(len(frames))
 
     reader = Reader(args, input_path) # zx
-    audio = reader.get_audio()
     height, width = reader.get_resolution()
     fps = reader.get_fps()
-    writer = Writer(args, audio, height, width, str(video_save_path), fps)
+    writer = Writer(args, reader, height, width, str(video_save_path), fps)
 
     # p1 = torch_mp.Process(target=put2inference, args=(put_queue, reader))
     p1 = threading.Thread(target=put2inference, args=(put_queue, reader))
