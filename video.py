@@ -166,6 +166,9 @@ class RealESRGANer:
             keyname = 'params'
         model.load_state_dict(loadnet[keyname], strict=True)
 
+
+        model = torch.compile(model)
+
         model.eval()
         self.model = model.to(self.device)
 
