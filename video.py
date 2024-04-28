@@ -187,6 +187,10 @@ class RealESRGANer:
     def pre_process(self, img):
         """Pre-process, such as pre-pad and mod pad, so that the images can be divisible
         """
+
+        img = torch.from_numpy(np.array(np.transpose(img, (2, 0, 1))))
+        img = img.unsqueeze(0).to(self.device)
+
         if self.half:
             img = img.half()
         else:
@@ -295,9 +299,6 @@ class RealESRGANer:
 
     @torch.no_grad()
     def enhance(self, img, outscale=None, alpha_upsampler='realesrgan'):
-
-        img = torch.from_numpy(np.array(np.transpose(img, (2, 0, 1))))
-        img = img.unsqueeze(0).to(self.device)
 
         self.pre_process(img)
 
