@@ -10,18 +10,23 @@ import fractions
 from pathlib import Path
 
 import cv2
-import torch
 import numpy as np
+
+import torch
+from torch import nn
 from torch import multiprocessing as torch_mp
 from torch.multiprocessing import Queue as torch_Queue
 
-from basicsr.archs.rrdbnet_arch import RRDBNet
-from basicsr.utils.download_util import load_file_from_url
+# 只使用动画放大的情况 下这个可以 不需要，
+# from basicsr.archs.rrdbnet_arch import RRDBNet
+# 提前 下载好模型
+# from basicsr.utils.download_util import load_file_from_url
+
 from torch.nn import functional as F
 from tqdm import tqdm
 
 # from realesrgan import RealESRGANer
-from realesrgan.archs.srvgg_arch import SRVGGNetCompact
+# from realesrgan.archs.srvgg_arch import SRVGGNetCompact
 
 try:
     import ffmpeg
@@ -38,7 +43,73 @@ except ImportError:
 ROOT_DIR_utils = Path(__file__).parent
 
 
-class RealESRGANer():
+
+class SRVGGNetCompact(nn.Module):
+    """A compact VGG-style network structure for super-resolution.
+
+    It is a compact network structure, which performs upsampling in the last layer and no convolution is
+    conducted on the HR feature space.
+
+    Args:
+        num_in_ch (int): Channel number of inputs. Default: 3.
+        num_out_ch (int): Channel number of outputs. Default: 3.
+        num_feat (int): Channel number of intermediate features. Default: 64.
+        num_conv (int): Number of convolution layers in the body network. Default: 16.
+        upscale (int): Upsampling factor. Default: 4.
+        act_type (str): Activation type, options: 'relu', 'prelu', 'leakyrelu'. Default: prelu.
+    """
+
+    def __init__(self, num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4, act_type='prelu'):
+        super(SRVGGNetCompact, self).__init__()
+        self.num_in_ch = num_in_ch
+        self.num_out_ch = num_out_ch
+        self.num_feat = num_feat
+        self.num_conv = num_conv
+        self.upscale = upscale
+        self.act_type = act_type
+
+        self.body = nn.ModuleList()
+        # the first conv
+        self.body.append(nn.Conv2d(num_in_ch, num_feat, 3, 1, 1))
+        # the first activation
+        if act_type == 'relu':
+            activation = nn.ReLU(inplace=True)
+        elif act_type == 'prelu':
+            activation = nn.PReLU(num_parameters=num_feat)
+        elif act_type == 'leakyrelu':
+            activation = nn.LeakyReLU(negative_slope=0.1, inplace=True)
+        self.body.append(activation)
+
+        # the body structure
+        for _ in range(num_conv):
+            self.body.append(nn.Conv2d(num_feat, num_feat, 3, 1, 1))
+            # activation
+            if act_type == 'relu':
+                activation = nn.ReLU(inplace=True)
+            elif act_type == 'prelu':
+                activation = nn.PReLU(num_parameters=num_feat)
+            elif act_type == 'leakyrelu':
+                activation = nn.LeakyReLU(negative_slope=0.1, inplace=True)
+            self.body.append(activation)
+
+        # the last conv
+        self.body.append(nn.Conv2d(num_feat, num_out_ch * upscale * upscale, 3, 1, 1))
+        # upsample
+        self.upsampler = nn.PixelShuffle(upscale)
+
+    def forward(self, x):
+        out = x
+        for i in range(0, len(self.body)):
+            out = self.body[i](out)
+
+        out = self.upsampler(out)
+        # add the nearest upsampled image, so that the network learns the residual
+        base = F.interpolate(x, scale_factor=self.upscale, mode='nearest')
+        out += base
+        return out
+
+
+class RealESRGANer:
     """A helper class for upsampling images with RealESRGAN.
 
     Args:
@@ -55,7 +126,7 @@ class RealESRGANer():
 
     def __init__(self,
                  scale,
-                 model_path,
+                 model_path: Path,
                  dni_weight=None,
                  model=None,
                  tile=0,
@@ -73,8 +144,7 @@ class RealESRGANer():
 
         # initialize model
         if gpu_id:
-            self.device = torch.device(
-                f'cuda:{gpu_id}' if torch.cuda.is_available() else 'cpu') if device is None else device
+            self.device = torch.device(f'cuda:{gpu_id}' if torch.cuda.is_available() else 'cpu') if device is None else device
         else:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
 
@@ -84,9 +154,10 @@ class RealESRGANer():
             loadnet = self.dni(model_path[0], model_path[1], dni_weight)
         else:
             # if the model_path starts with https, it will first download models to the folder: weights
-            if str(model_path).startswith('https://'):
-                model_path = load_file_from_url(
-                    url=model_path, model_dir=ROOT_DIR_utils / 'weights', progress=True, file_name=None)
+
+            # if str(model_path).startswith('https://'):
+            #     model_path = load_file_from_url(url=model_path, model_dir=ROOT_DIR_utils / 'weights', progress=True, file_name=None)
+
             loadnet = torch.load(model_path, map_location=torch.device('cpu'))
 
         # prefer to use params_ema
@@ -98,6 +169,7 @@ class RealESRGANer():
 
         model.eval()
         self.model = model.to(self.device)
+
         if self.half:
             self.model = self.model.half()
 
@@ -115,10 +187,14 @@ class RealESRGANer():
     def pre_process(self, img):
         """Pre-process, such as pre-pad and mod pad, so that the images can be divisible
         """
-        img = torch.from_numpy(np.transpose(img, (2, 0, 1))).float()
-        self.img = img.unsqueeze(0).to(self.device)
         if self.half:
-            self.img = self.img.half()
+            img = img.half()
+        else:
+            img = img.float()
+
+        self.img = img / 255.0
+
+        # self.img = torch.cat([img])
 
         # pre_pad
         if self.pre_pad != 0:
@@ -219,75 +295,25 @@ class RealESRGANer():
 
     @torch.no_grad()
     def enhance(self, img, outscale=None, alpha_upsampler='realesrgan'):
-        h_input, w_input = img.shape[0:2]
-        # img: numpy
-        img = img.astype(np.float32)
-        if np.max(img) > 256:  # 16-bit image
-            max_range = 65535
-            print('\tInput is a 16-bit image')
-        else:
-            max_range = 255
-        img = img / max_range
-        if len(img.shape) == 2:  # gray image
-            img_mode = 'L'
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-        elif img.shape[2] == 4:  # RGBA image with alpha channel
-            img_mode = 'RGBA'
-            alpha = img[:, :, 3]
-            img = img[:, :, 0:3]
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            if alpha_upsampler == 'realesrgan':
-                alpha = cv2.cvtColor(alpha, cv2.COLOR_GRAY2RGB)
-        else:
-            img_mode = 'RGB'
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        # ------------------- process image (without the alpha channel) ------------------- #
+        img = torch.from_numpy(np.array(np.transpose(img, (2, 0, 1))))
+        img = img.unsqueeze(0).to(self.device)
+
         self.pre_process(img)
+
         if self.tile_size > 0:
             self.tile_process()
         else:
             self.process()
         output_img = self.post_process()
-        output_img = output_img.data.squeeze().float().cpu().clamp_(0, 1).numpy()
-        output_img = np.transpose(output_img[[2, 1, 0], :, :], (1, 2, 0))
-        if img_mode == 'L':
-            output_img = cv2.cvtColor(output_img, cv2.COLOR_BGR2GRAY)
-
-        # ------------------- process the alpha channel if necessary ------------------- #
-        if img_mode == 'RGBA':
-            if alpha_upsampler == 'realesrgan':
-                self.pre_process(alpha)
-                if self.tile_size > 0:
-                    self.tile_process()
-                else:
-                    self.process()
-                output_alpha = self.post_process()
-                output_alpha = output_alpha.data.squeeze().float().cpu().clamp_(0, 1).numpy()
-                output_alpha = np.transpose(output_alpha[[2, 1, 0], :, :], (1, 2, 0))
-                output_alpha = cv2.cvtColor(output_alpha, cv2.COLOR_BGR2GRAY)
-            else:  # use the cv2 resize for alpha channel
-                h, w = alpha.shape[0:2]
-                output_alpha = cv2.resize(alpha, (w * self.scale, h * self.scale), interpolation=cv2.INTER_LINEAR)
-
-            # merge the alpha channel
-            output_img = cv2.cvtColor(output_img, cv2.COLOR_BGR2BGRA)
-            output_img[:, :, 3] = output_alpha
 
         # ------------------------------ return ------------------------------ #
-        if max_range == 65535:  # 16-bit image
-            output = (output_img * 65535.0).round().astype(np.uint16)
-        else:
-            output = (output_img * 255.0).round().astype(np.uint8)
-
         if outscale is not None and outscale != float(self.scale):
-            output = cv2.resize(
-                output, (
-                    int(w_input * outscale),
-                    int(h_input * outscale),
-                ), interpolation=cv2.INTER_LANCZOS4)
+            output_img = F.interpolate(output_img, scale_factor=outscale / float(self.scale), mode="area")
 
-        return output, img_mode
+        output = (output_img * 255.0).clamp_(0, 255).byte().permute(0, 2, 3, 1).contiguous().cpu().numpy()
+
+        return output
 
 
 # =================================================
@@ -333,11 +359,12 @@ class Reader:
         self.paths = []  # for image&folder type
         self.audio = None
         self.input_fps = None
+
         if self.input_type.startswith('video'):
-            self.stream_reader = (
-                ffmpeg.input(video_path).output('pipe:', format='rawvideo', pix_fmt='bgr24',
-                                                loglevel='error').run_async(
-                                                    pipe_stdin=True, pipe_stdout=True, cmd=args.ffmpeg_bin))
+            self.stream_reader = (ffmpeg.input(video_path)
+                .output('pipe:', format='rawvideo', pix_fmt='bgr24', loglevel='error')
+                .run_async(pipe_stdin=True, pipe_stdout=True, cmd=args.ffmpeg_bin))
+
             meta = get_video_meta_info(video_path)
             self.width = meta['width']
             self.height = meta['height']
@@ -350,11 +377,14 @@ class Reader:
         return self.height, self.width
 
     def get_fps(self):
+
         if self.args.fps is not None:
             return self.args.fps
         elif self.input_fps is not None:
             return self.input_fps
-        return 24
+        else:
+            raise ValueError("没有拿到视频帧率fps")
+
 
     def get_audio(self):
         return self.audio
@@ -392,23 +422,18 @@ class Writer:
 
         if audio is not None:
             self.stream_writer = (
-                ffmpeg.input('pipe:', format='rawvideo', pix_fmt='bgr24', s=f'{out_width}x{out_height}',
-                             framerate=fps).output(
-                                 audio,
-                                 video_save_path,
-                                 pix_fmt='yuv420p',
-                                 #vcodec='libx264',
-                                 vcodec=encoder,
-                                 loglevel='error',
-                                 acodec='copy').overwrite_output().run_async(
-                                     pipe_stdin=True, pipe_stdout=True, cmd=args.ffmpeg_bin))
+                ffmpeg.input('pipe:', format='rawvideo', pix_fmt='bgr24', s=f'{out_width}x{out_height}', framerate=fps)
+                .output(audio, video_save_path, pix_fmt='yuv420p', rc="constqp", level="6", vcodec=encoder, loglevel='error', acodec='copy')
+                .overwrite_output()
+                .run_async(pipe_stdin=True, pipe_stdout=True, cmd=args.ffmpeg_bin)
+                )
         else:
             self.stream_writer = (
-                ffmpeg.input('pipe:', format='rawvideo', pix_fmt='bgr24', s=f'{out_width}x{out_height}',
-                             framerate=fps).output(
-                                 video_save_path, pix_fmt='yuv420p', vcodec=encoder,
-                                 loglevel='error').overwrite_output().run_async(
-                                     pipe_stdin=True, pipe_stdout=True, cmd=args.ffmpeg_bin))
+                ffmpeg.input('pipe:', format='rawvideo', pix_fmt='bgr24', s=f'{out_width}x{out_height}', framerate=fps)
+                .output(video_save_path, pix_fmt='yuv420p', rc="constqp", level="6", vcodec=encoder, loglevel='error')
+                .overwrite_output()
+                .run_async(pipe_stdin=True, pipe_stdout=True, cmd=args.ffmpeg_bin)
+                )
 
     def write_frame(self, frame):
         frame = frame.astype(np.uint8).tobytes()
@@ -421,7 +446,10 @@ class Writer:
 
 def inference_video(args, put_queue, get_queue, device=None):
     # ---------------------- determine models according to model names ---------------------- #
+
     args.model_name = args.model_name.split('.pth')[0]
+
+    """
     if args.model_name == 'RealESRGAN_x4plus':  # x4 RRDBNet model
         model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
         netscale = 4
@@ -449,16 +477,24 @@ def inference_video(args, put_queue, get_queue, device=None):
             'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-wdn-x4v3.pth',
             'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth'
         ]
+    """
+
+    model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4, act_type='prelu')
+    netscale = 4
 
     # ---------------------- determine model paths ---------------------- #
     # model_path = os.path.join('weights', args.model_name + '.pth')
+    # 模型在当前文件，目录的 weights/ 下面
     weights = Path('weights')
     model_path = weights / (args.model_name + '.pth')
-    if not model_path.is_file():
-        ROOT_DIR = Path(__file__).parent
-        for url in file_url:
-            # model_path will be updated
-            model_path = load_file_from_url(url=url, model_dir=weights, progress=True, file_name=None)
+
+
+    # 这是模型不在时，去线上下载。 目前是需要手动下载的，这样先关闭。
+    # if not model_path.is_file():
+    #     ROOT_DIR = Path(__file__).parent
+    #     for url in file_url:
+    #         # model_path will be updated
+    #         model_path = load_file_from_url(url=url, model_dir=weights, progress=True, file_name=None)
 
     # use dni to control the denoise strength
     dni_weight = None
@@ -480,21 +516,6 @@ def inference_video(args, put_queue, get_queue, device=None):
         device=device,
     )
 
-    if 'anime' in args.model_name and args.face_enhance:
-        print('face_enhance is not supported in anime models, we turned this option off for you. '
-              'if you insist on turning it on, please manually comment the relevant lines of code.')
-        args.face_enhance = False
-
-    if args.face_enhance:  # Use GFPGAN for face enhancement
-        from gfpgan import GFPGANer
-        face_enhancer = GFPGANer(
-            model_path='https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.3.pth',
-            upscale=args.outscale,
-            arch='clean',
-            channel_multiplier=2,
-            bg_upsampler=upsampler)  # TODO support custom device
-    else:
-        face_enhancer = None
 
     print(f"inference_video() pid: {os.getpid()} 启动")
     while True:
@@ -507,12 +528,9 @@ def inference_video(args, put_queue, get_queue, device=None):
         seq, img = img
 
         try:
-            if args.face_enhance:
-                _, _, output = face_enhancer.enhance(img, has_aligned=False, only_center_face=False, paste_back=True)
-            else:
-                output, _ = upsampler.enhance(img, outscale=args.outscale)
+            output = upsampler.enhance(img, outscale=args.outscale)
         except RuntimeError as error:
-            print('Error', error)
+            print('Error:', error)
             print('If you encounter CUDA out of memory, try to set --tile with a smaller number.')
             sys.exit(1)
         else:
@@ -635,46 +653,35 @@ def main():
     """
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--input', type=str, default='inputs', help='Input video, image or folder')
-    parser.add_argument(
-        '-n',
-        '--model_name',
-        type=str,
-        default='realesr-animevideov3',
+    parser.add_argument('-n', '--model_name', type=str, default='realesr-animevideov3',
         help=('Model names: realesr-animevideov3 | RealESRGAN_x4plus_anime_6B | RealESRGAN_x4plus | RealESRNet_x4plus |'
               ' RealESRGAN_x2plus | realesr-general-x4v3'
-              'Default:realesr-animevideov3'))
+              'Default: realesr-animevideov3'))
+
     parser.add_argument('-o', '--output', type=str, default='results', help='Output folder')
-    parser.add_argument(
-        '-dn',
-        '--denoise_strength',
-        type=float,
-        default=0.5,
-        help=('Denoise strength. 0 for weak denoise (keep noise), 1 for strong denoise ability. '
-              'Only used for the realesr-general-x4v3 model'))
+
     parser.add_argument('-s', '--outscale', type=float, default=4, help='The final upsampling scale of the image')
     parser.add_argument('--suffix', type=str, default='out', help='Suffix of the restored video')
     parser.add_argument('-t', '--tile', type=int, default=0, help='Tile size, 0 for no tile during testing')
     parser.add_argument('--tile_pad', type=int, default=10, help='Tile padding')
     parser.add_argument('--pre_pad', type=int, default=0, help='Pre padding size at each border')
-    parser.add_argument('--face_enhance', action='store_true', help='Use GFPGAN to enhance face')
-    parser.add_argument(
-        '--fp32', action='store_true', help='Use fp32 precision during inference. Default: fp16 (half precision).')
+
+    # 这个模型只支持动漫, 不在需要这个选项。
+    # parser.add_argument('--face_enhance', action='store_true', help='Use GFPGAN to enhance face')
+
+    parser.add_argument('--fp32', action='store_true', help='Use fp32 precision during inference. Default: fp16 (half precision).')
     parser.add_argument('--fps', type=float, default=None, help='FPS of the output video')
     parser.add_argument('--ffmpeg_bin', type=str, default='ffmpeg', help='The path to ffmpeg')
     parser.add_argument('--encoder', type=str, default='libx265', help='默认使用CPU(慢), 可以使用GPU(hevc_nvenc)')
     # parser.add_argument('--extract_frame_first', action='store_true')
     parser.add_argument('--num_process_per_gpu', type=int, default=1, help="每个 GPU 的数量进程")
 
-    parser.add_argument(
-        '--alpha_upsampler',
-        type=str,
-        default='realesrgan',
-        help='The upsampler for the alpha channels. Options: realesrgan | bicubic')
-    parser.add_argument(
-        '--ext',
-        type=str,
-        default='auto',
+    parser.add_argument('--alpha_upsampler', type=str, default='realesrgan',
+                        help='The upsampler for the alpha channels. Options: realesrgan | bicubic')
+
+    parser.add_argument('--ext', type=str, default='auto',
         help='Image extension. Options: auto | jpg | png, auto means using the same extension as inputs')
+
     args = parser.parse_args()
 
     # args.input = args.input.rstrip('/').rstrip('\\')
