@@ -190,8 +190,9 @@ class RealESRGANer:
         """Pre-process, such as pre-pad and mod pad, so that the images can be divisible
         """
 
-        img = torch.from_numpy(np.array(np.transpose(img, (2, 0, 1))))
-        img = img.unsqueeze(0).to(self.device)
+        img = torch.from_numpy(np.array(np.transpose(img, (2, 0, 1)))).unsqueeze(0)
+        # img = img.pin_memory()  # 这里会慢点
+        img = img.to(self.device)
 
         if self.half:
             img = img.half()
@@ -518,6 +519,7 @@ def inference_video(args, put_queue, get_queue, device=None):
 
 
     print(f"inference_video() pid: {os.getpid()} 启动")
+
     while True:
         img = put_queue.get()
         if img is None:
