@@ -11,6 +11,6 @@
 	tqdm==4.66.2
 	```
 
-- 手动下载 [realesr-animevideov3](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth) 模型
+- 手动下载 [realesr-animevideov3](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth) 模型 放到当前目录的 weights/ 下
 
 - 运行 python video.py --help
