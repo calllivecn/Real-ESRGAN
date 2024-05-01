@@ -8,20 +8,30 @@ import threading
 import mimetypes
 import fractions
 from pathlib import Path
+from multiprocessing.shared_memory import SharedMemory
+
+from typing import (
+    List,
+    Tuple,
+    Union,
+)
 
 import numpy as np
 
 import torch
 from torch import nn
-from torch.nn import functional as F
 from torch import multiprocessing as torch_mp
-from torch.multiprocessing import Queue as torch_Queue
+from torch.multiprocessing import (
+    Queue as torch_Queue,
+    JoinableQueue,
+)
 
 # 只使用动画放大的情况 下这个可以 不需要，
 # from basicsr.archs.rrdbnet_arch import RRDBNet
 # 提前 下载好模型
 # from basicsr.utils.download_util import load_file_from_url
 
+from torch.nn import functional as F
 from tqdm import tqdm
 
 # from realesrgan import RealESRGANer
@@ -164,9 +174,11 @@ class RealESRGANer:
             keyname = 'params_ema'
         else:
             keyname = 'params'
-
         model.load_state_dict(loadnet[keyname], strict=True)
+
+
         model = torch.compile(model)
+
         model.eval()
         self.model = model.to(self.device)
 
@@ -184,12 +196,14 @@ class RealESRGANer:
             net_a[key][k] = dni_weight[0] * v_a + dni_weight[1] * net_b[key][k]
         return net_a
 
-    def pre_process(self, img):
+    def pre_process(self, img: np.ndarray):
         """Pre-process, such as pre-pad and mod pad, so that the images can be divisible
         """
 
-        # img = torch.from_numpy(np.array(np.transpose(img, (2, 0, 1))))
-        # img = img.unsqueeze(0).to(self.device)
+        img = torch.from_numpy(np.array(np.transpose(img, (2, 0, 1)))).unsqueeze(0)
+        # img = img.unsqueeze(0)
+        # img = img.pin_memory()  # 这里会慢点
+        img = img.to(self.device)
 
         if self.half:
             img = img.half()
@@ -197,6 +211,8 @@ class RealESRGANer:
             img = img.float()
 
         self.img = img / 255.0
+
+        # self.img = torch.cat([img])
 
         # pre_pad
         if self.pre_pad != 0:
@@ -296,7 +312,7 @@ class RealESRGANer:
         return self.output
 
     @torch.no_grad()
-    def enhance(self, img, outscale=None, alpha_upsampler='realesrgan'):
+    def enhance(self, img: np.ndarray, outscale=None, alpha_upsampler='realesrgan') -> np.ndarray:
 
         self.pre_process(img)
 
@@ -310,8 +326,7 @@ class RealESRGANer:
         if outscale is not None and outscale != float(self.scale):
             output_img = F.interpolate(output_img, scale_factor=outscale / float(self.scale), mode="area")
 
-        # output = (output_img * 255.0).clamp_(0, 255).byte().permute(0, 2, 3, 1).contiguous().cpu().numpy()
-        output = (output_img * 255.0).clamp_(0, 255).byte().permute(0, 2, 3, 1).contiguous().cpu()
+        output = (output_img * 255.0).clamp_(0, 255).byte().permute(0, 2, 3, 1).contiguous().cpu().numpy()
 
         return output
 
@@ -349,6 +364,48 @@ def get_video_meta_info(video_path):
     return ret
 
 
+class CommunicationPacket:
+
+
+    def __init__(self):
+        self.exit_flag: bool = False
+        self.seq: int = None
+        self.sm: SharedMemory = None
+
+    def ndarray_struct(self, nd: np.ndarray):
+        self.shape = nd.shape
+        self.dtype = nd.dtype
+        self.size = nd.nbytes
+
+    def create(self, size) -> SharedMemory:
+        self.sm = SharedMemory(create=True, size=size)
+        return self.sm
+
+    def to_numpy(self) -> Tuple[np.ndarray, SharedMemory]:
+        sm = SharedMemory(self.sm.name)
+
+        ndarray = np.ndarray(self.shape, dtype=self.dtype, buffer=sm.buf)
+
+        # 可以从buf 创建 Tensor
+        # ndarray = torch.frombuffer(buffer=sm.buf, dtype=torch.uint8)
+
+        # result = ndarray.copy()
+        # sm.close()
+        return ndarray, sm
+
+    def tensor2sm(self, nd):
+        self.ndarray_struct(nd)
+
+        sm = SharedMemory(create=True, size=nd.nbytes)
+        ndarray = np.ndarray(self.shape, dtype=self.dtype, buffer=sm.buf)
+        ndarray[:] = nd[:]
+
+        self.sm.close()
+        self.sm.unlink()
+
+        self.sm = sm
+
+
 class Reader:
 
     #def __init__(self, args, total_workers=1, worker_idx=0):
@@ -372,6 +429,7 @@ class Reader:
             self.audio = meta['audio']
             self.nb_frames = meta['nb_frames']
 
+        self.frame_size = self.width*self.height*3
 
     def get_resolution(self):
         return self.height, self.width
@@ -379,8 +437,11 @@ class Reader:
     def get_fps(self):
 
         if self.args.fps is not None:
+            self.fps = self.args.fps
             return self.args.fps
+
         elif self.input_fps is not None:
+            self.fps = self.input_fps
             return self.input_fps
         else:
             raise ValueError("没有拿到视频帧率fps")
@@ -390,11 +451,30 @@ class Reader:
         return self.nb_frames
 
     def get_frame_from_stream(self):
-        img_bytes = self.stream_reader.stdout.read(self.width * self.height * 3)  # 3 bytes for one pixel
+        img_bytes = self.stream_reader.stdout.read(self.frame_size)  # 3 bytes for one pixel
         if not img_bytes:
             return None
         img = np.frombuffer(img_bytes, np.uint8).reshape([self.height, self.width, 3])
         return img
+
+    def get_frame_to_shared_buf(self, cp: CommunicationPacket):
+        sm = cp.create(self.frame_size)
+        buf = sm.buf
+        fd = self.stream_reader.stdout.fileno()
+        cur = 0
+        while (n := os.readv(fd, [buf[cur:self.frame_size]])) != 0:
+            cur += n
+
+        img = np.frombuffer(buf, np.uint8).reshape([self.height, self.width, 3])
+        cp.ndarray_struct(img)
+
+        sm.close()
+
+        if cur == 0:
+            print(f"视频文件已经读取完毕...")
+            return False #已经读取完毕
+        else:
+            return True
 
 
     def get_frame(self):
@@ -408,7 +488,7 @@ class Reader:
 
 class Writer:
 
-    def __init__(self, args, reader: Reader, video_save_path,):
+    def __init__(self, args, reader: Reader, video_save_path):
         out_width, out_height = int(reader.width * args.outscale), int(reader.height * args.outscale)
         if out_height > 2160:
             print('You are generating video that is larger than 4K, which will be very slow due to IO speed.',
@@ -436,23 +516,95 @@ class Writer:
         frame = frame.astype(np.uint8).tobytes()
         self.stream_writer.stdin.write(frame)
 
+    def write_frame_shared_buf(self, frame: memoryview):
+        fd = self.stream_writer.stdin.fileno()
+        os.writev(fd, [frame])
+
+
     def close(self):
         self.stream_writer.stdin.close()
         self.stream_writer.wait()
 
 
-def inference_video(args, put_queue, get_queue, device=None):
+class SequenceQueue:
+
+    def __init__(self, size: int):
+        self._size = size
+
+        self._task_queue = torch_Queue(size)
+        self._result_queue = torch_Queue(size)
+
+        self._seq = 0
+
+    def reader_task(self, task: CommunicationPacket):
+        task.seq = self._seq
+        self._seq += 1
+        self._task_queue.put(task)
+
+    def put_result(self, result: CommunicationPacket):
+        self._result_queue.put(result)
+
+    def get_task(self) -> CommunicationPacket:
+        return self._task_queue.get()
+
+    def writer_result(self) -> CommunicationPacket:
+        return self._result_queue.get()
+
+    def put_done(self):
+        cp = CommunicationPacket()
+        cp.exit_flag = True
+        self._task_queue.put(cp)
+
+    def close(self):
+        self._task_queue.close()
+        self._result_queue.close()
+
+
+
+# def inference_video(args, put_queue, get_queue, device=None):
+def inference_video(args, sq: SequenceQueue, device=None):
     # ---------------------- determine models according to model names ---------------------- #
 
     args.model_name = args.model_name.split('.pth')[0]
+
+    """
+    if args.model_name == 'RealESRGAN_x4plus':  # x4 RRDBNet model
+        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+        netscale = 4
+        file_url = ['https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth']
+    elif args.model_name == 'RealESRNet_x4plus':  # x4 RRDBNet model
+        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+        netscale = 4
+        file_url = ['https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.1/RealESRNet_x4plus.pth']
+    elif args.model_name == 'RealESRGAN_x4plus_anime_6B':  # x4 RRDBNet model with 6 blocks
+        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4)
+        netscale = 4
+        file_url = ['https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth']
+    elif args.model_name == 'RealESRGAN_x2plus':  # x2 RRDBNet model
+        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
+        netscale = 2
+        file_url = ['https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth']
+    elif args.model_name == 'realesr-animevideov3':  # x4 VGG-style model (XS size)
+        model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4, act_type='prelu')
+        netscale = 4
+        file_url = ['https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-animevideov3.pth']
+    elif args.model_name == 'realesr-general-x4v3':  # x4 VGG-style model (S size)
+        model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=32, upscale=4, act_type='prelu')
+        netscale = 4
+        file_url = [
+            'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-wdn-x4v3.pth',
+            'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth'
+        ]
+    """
+
     model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4, act_type='prelu')
     netscale = 4
 
-    # 这是模型不在时，去线上下载。 目前是需要手动下载的，这样先关闭。
+    # ---------------------- determine model paths ---------------------- #
+    # model_path = os.path.join('weights', args.model_name + '.pth')
     # 模型在当前文件，目录的 weights/ 下面
     weights = ROOT_DIR_utils / 'weights'
     model_path = weights / (args.model_name + '.pth')
-
 
     dni_weight = None
     if args.model_name == 'realesr-general-x4v3' and args.denoise_strength != 1:
@@ -473,60 +625,95 @@ def inference_video(args, put_queue, get_queue, device=None):
         device=device,
     )
 
+
     print(f"inference_video() pid: {os.getpid()} 启动")
 
-    batch_size = 20
-    flag_exit = False
     while True:
-
-        # 构建一个batch
-        batch = []
-
-        for i in range(batch_size):
-            img = put_queue.get()
-            if img is None and i == 0:
-                put_queue.put(None)
-                flag_exit = True
-                break
-
-            seq, img = img
-            print(f"put_queue.get() seq -> {seq=}")
-
-            img = torch.from_numpy(np.array(np.transpose(img, (2, 0, 1)))).unsqueeze(0)
-
-            # batch.append(torch.from_numpy(img))
-            batch.append(img)
-
-        if flag_exit:
+        cp = sq.get_task()
+        if cp.exit_flag:
+            sq.put_result(cp)
+            print(f"inference_video() pid: {os.getpid()} 退出")
             break
 
-        img_batch = torch.cat(batch)
-        img_batch.pin_memory()
-        img_batch = img_batch.cuda(device)
-        # 计算一个batch
+        img, sm = cp.to_numpy()
+        # print(f"{img.shape=}")
+
         try:
-            # print(f"当前计算了：{seq}")
-            output = upsampler.enhance(img_batch, outscale=args.outscale)
+            # img: ndarray, output: Tensor in (cpu memory or gpu memory)
+            output = upsampler.enhance(img, outscale=args.outscale)
         except RuntimeError as error:
             print('Error:', error)
             print('If you encounter CUDA out of memory, try to set --tile with a smaller number.')
             sys.exit(1)
 
+        cp.tensor2sm(output)
+        sq.put_result(cp)
+
         torch.cuda.synchronize(device)
 
-        seq = seq - batch_size + 1
-        print(f"{output.shape=}")
-        # output = torch.split(output, batch_size, dim=1)
-        print(f"{len(output)=}, {output[0].shape=}")
-        for i in range(batch_size):
-            print(f"当前返回队列：{seq+i}")
-            get_queue.put((seq + i, output[i].numpy()))
-            # get_queue.put((seq + i, img))
-            i+=1
+    # sq.close()
 
-    put_queue.close()
-    get_queue.close()
-    print(f"inference_video() pid: {os.getpid()} 退出")
+
+class SequenceFrame:
+
+    def __init__(self):
+        self.seq = 0
+        self.stash = []
+
+    def next_frame(self, result: CommunicationPacket) -> List:
+        frames = []
+        heapq.heappush(self.stash, (result.seq, result))
+        while len(self.stash) > 0 and self.seq == self.stash[0][0]:
+            _, cp = heapq.heappop(self.stash)
+            frames.append(cp)
+            self.seq += 1
+
+        return frames
+
+
+def put2inference(sq: SequenceQueue, reader: Reader):
+    while True:
+
+        cp = CommunicationPacket()
+
+        if reader.get_frame_to_shared_buf(cp):
+            sq.reader_task(cp)
+        else:
+            cp.exit_flag = True
+            sq.reader_task(cp)
+            break
+
+
+def get4inference(sq: SequenceQueue, writer: Writer, total_frame: int):
+    # t1 = time.time()
+    # c = 0
+
+    pbar = tqdm(total=total_frame, unit='frame', desc='inference')
+
+    seq_frames = SequenceFrame()
+
+    while True:
+        cp = sq.writer_result()
+        if cp.exit_flag:
+            print("已经inference_vide() 处理完了")
+            break
+
+        frames = seq_frames.next_frame(cp)
+
+        [writer.write_frame_shared_buf(frame.sm.buf) for frame in frames]
+        [frame.sm.unlink() for frame in frames]
+
+
+        """
+        t2 = time.time()
+        t = t2 - t1
+        c += len(frames)
+        if t >= 1:
+            print(f"当前处理速度： {round(c/t, 1)} frame/s")
+            c = 0
+            t1 = t2
+        """
+        pbar.update(len(frames))
 
 
 def run(args):
@@ -539,9 +726,7 @@ def run(args):
 
     video_save_path = output / f"{os.path.splitext(input_path.name)[0]}_{args.suffix}{video_suffix}"
 
-    put_queue = torch_Queue(8)
-    get_queue = torch_Queue(8)
-
+    sq = SequenceQueue(8)
     num_gpus = torch.cuda.device_count()
 
     total_process = num_gpus * args.num_process_per_gpu
@@ -549,80 +734,32 @@ def run(args):
     # 启动GPU 进程
     process = []
     for i in range(total_process):
-        p = torch_mp.Process(target=inference_video, args=(args, put_queue, get_queue, torch.device(i % num_gpus)))
+        p = torch_mp.Process(target=inference_video, args=(args, sq, torch.device(i % num_gpus)))
         p.start()
         process.append(p)
 
     print("GPU Pool start")
 
-
-    ###############
-    #  使用队列
-    ###############
-
-    def next_frame(seq, stash, seq_frame):
-        heapq.heappush(stash, seq_frame)
-        frames = []
-        while len(stash) > 0 and seq == stash[0][0]:
-            _, frame = heapq.heappop(stash)
-            frames.append(frame)
-            seq += 1
-
-        return seq, frames
-
-
-    def put2inference(q, reader):
-        seq = 0
-        while (frame := reader.get_frame()) is not None:
-            q.put((seq, frame))
-            seq += 1
-
-        q.put(None)
-
-    def get4inference(q, writer):
-        # pbar = tqdm(total=len(reader), unit='frame', desc='inference')
-        seq = 0
-        stash = []
-
-        t1 = time.time()
-        c = 0
-
-        pbar = tqdm(total=len(reader), unit='frame', desc='inference')
-        while (seq_frame := q.get()) is not None:
-            # 保证帧是有序连续的输出到ffmpeg
-            seq, frames = next_frame(seq, stash, seq_frame)
-
-            [writer.write_frame(frame) for frame in frames]
-            t2 = time.time()
-            t = t2 - t1
-            c += len(frames)
-            if t >= 1:
-                print(f"当前处理速度： {round(c/t, 1)} frame/s")
-                c = 0
-                t1 = t2
-            pbar.update(len(frames))
-
     reader = Reader(args, input_path) # zx
     writer = Writer(args, reader, str(video_save_path))
 
-    # p1 = torch_mp.Process(target=put2inference, args=(put_queue, reader))
-    p1 = threading.Thread(target=put2inference, args=(put_queue, reader))
+    p1 = torch_mp.Process(target=put2inference, args=(sq, reader))
+    # p1 = threading.Thread(target=put2inference, args=(sq, reader))
     p1.start()
 
-    # p2 = torch_mp.Process(target=get4inference, args=(get_queue, writer))
-    p2 = threading.Thread(target=get4inference, args=(get_queue, writer))
+    p2 = torch_mp.Process(target=get4inference, args=(sq, writer, len(reader)))
+    # p2 = threading.Thread(target=get4inference, args=(sq, writer))
     p2.start()
 
     # 等待GPU Pool 退出
-    [ p.join() for p in process ]
-
-    # 给 get4inference() 退出信号
-    get_queue.put(None)
+    try:
+        [ p.join() for p in process ]
+    except KeyboardInterrupt:
+        [ p.terminate() for p in process ]
+        print("Ctrl+C 退出")
 
     p1.join()
     p2.join()
-
-    print("已经inference_vide() 处理完了")
 
     # finally cleanup
     reader.close()
