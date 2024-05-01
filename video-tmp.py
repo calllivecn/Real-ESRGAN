@@ -401,8 +401,6 @@ class CommunicationPacket:
         ndarray[:] = nd[:]
 
         self.sm.close()
-        self.sm.unlink()
-
         self.sm = sm
 
 
@@ -467,8 +465,6 @@ class Reader:
 
         img = np.frombuffer(buf, np.uint8).reshape([self.height, self.width, 3])
         cp.ndarray_struct(img)
-
-        sm.close()
 
         if cur == 0:
             print(f"视频文件已经读取完毕...")
@@ -646,6 +642,9 @@ def inference_video(args, sq: SequenceQueue, device=None):
             print('If you encounter CUDA out of memory, try to set --tile with a smaller number.')
             sys.exit(1)
 
+        sm.close()
+        sm.unlink()
+
         cp.tensor2sm(output)
         sq.put_result(cp)
 
@@ -678,6 +677,7 @@ def put2inference(sq: SequenceQueue, reader: Reader):
 
         if reader.get_frame_to_shared_buf(cp):
             sq.reader_task(cp)
+            cp.sm.close()
         else:
             cp.exit_flag = True
             sq.reader_task(cp)

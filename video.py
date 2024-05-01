@@ -412,8 +412,8 @@ class Reader:
 
 class Writer:
 
-    def __init__(self, args, reader: Reader, height, width, video_save_path, fps):
-        out_width, out_height = int(width * args.outscale), int(height * args.outscale)
+    def __init__(self, args, reader: Reader, video_save_path):
+        out_width, out_height = int(reader.width * args.outscale), int(reader.height * args.outscale)
         if out_height > 2160:
             print('You are generating video that is larger than 4K, which will be very slow due to IO speed.',
                   'We highly recommend to decrease the outscale(aka, -s).')
@@ -423,14 +423,14 @@ class Writer:
 
         if reader.audio is not None:
             self.stream_writer = (
-                ffmpeg.input('pipe:', format='rawvideo', pix_fmt='rgb24', s=f'{out_width}x{out_height}', framerate=fps)
+                ffmpeg.input('pipe:', format='rawvideo', pix_fmt='rgb24', s=f'{out_width}x{out_height}', framerate=reader.input_fps)
                 .output(reader.audio, video_save_path, pix_fmt='yuv420p', rc="constqp", level="6", vcodec=encoder, loglevel='error', acodec='copy')
                 .overwrite_output()
                 .run_async(pipe_stdin=True, pipe_stdout=True, cmd=args.ffmpeg_bin)
                 )
         else:
             self.stream_writer = (
-                ffmpeg.input('pipe:', format='rawvideo', pix_fmt='rgb24', s=f'{out_width}x{out_height}', framerate=fps)
+                ffmpeg.input('pipe:', format='rawvideo', pix_fmt='rgb24', s=f'{out_width}x{out_height}', framerate=reader.input_fps)
                 .output(video_save_path, pix_fmt='yuv420p', rc="constqp", level="6", vcodec=encoder, loglevel='error')
                 .overwrite_output()
                 .run_async(pipe_stdin=True, pipe_stdout=True, cmd=args.ffmpeg_bin)
@@ -483,19 +483,9 @@ def inference_video(args, put_queue, get_queue, device=None):
     model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4, act_type='prelu')
     netscale = 4
 
-    # ---------------------- determine model paths ---------------------- #
-    # model_path = os.path.join('weights', args.model_name + '.pth')
-    # 模型在当前文件，目录的 weights/ 下面
+    # 模型需要放在当前文件，目录的 weights/ 下面
     weights = ROOT_DIR_utils / 'weights'
     model_path = weights / (args.model_name + '.pth')
-
-
-    # 这是模型不在时，去线上下载。 目前是需要手动下载的，这样先关闭。
-    # if not model_path.is_file():
-    #     ROOT_DIR = Path(__file__).parent
-    #     for url in file_url:
-    #         # model_path will be updated
-    #         model_path = load_file_from_url(url=url, model_dir=weights, progress=True, file_name=None)
 
     # use dni to control the denoise strength
     dni_weight = None
@@ -552,7 +542,8 @@ def run(args):
 
     input_path = Path(args.input)
 
-    video_save_path = output / f"{os.path.splitext(input_path.name)[0]}_{args.suffix}{video_suffix}"
+    # video_save_path = output / f"{os.path.splitext(input_path.name)[0]}_{args.suffix}{video_suffix}"
+    video_save_path = output / f"{os.path.splitext(input_path.name)[0]}_{args.suffix}.mkv"
 
     put_queue = torch_Queue(8)
     get_queue = torch_Queue(8)
@@ -619,9 +610,7 @@ def run(args):
             pbar.update(len(frames))
 
     reader = Reader(args, input_path) # zx
-    height, width = reader.get_resolution()
-    fps = reader.get_fps()
-    writer = Writer(args, reader, height, width, str(video_save_path), fps)
+    writer = Writer(args, reader, str(video_save_path))
 
     # p1 = torch_mp.Process(target=put2inference, args=(put_queue, reader))
     p1 = threading.Thread(target=put2inference, args=(put_queue, reader))
