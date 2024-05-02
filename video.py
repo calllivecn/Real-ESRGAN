@@ -660,7 +660,7 @@ def main():
     # parser.add_argument('--face_enhance', action='store_true', help='Use GFPGAN to enhance face')
 
     parser.add_argument('--fp32', action='store_true', help='Use fp32 precision during inference. Default: fp16 (half precision).')
-    parser.add_argument('--fps', type=float, default=None, help='FPS of the output video')
+    # parser.add_argument('--fps', type=float, default=None, help='FPS of the output video')
     parser.add_argument('--ffmpeg_bin', type=str, default='ffmpeg', help='The path to ffmpeg')
     parser.add_argument('--encoder', type=str, default='libx265', help='默认使用CPU(慢), 可以使用GPU(hevc_nvenc)')
     # parser.add_argument('--extract_frame_first', action='store_true')
